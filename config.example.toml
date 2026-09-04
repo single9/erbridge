@@ -1,0 +1,41 @@
+# Example erbridge config file. Copy it to config.toml and edit as needed,
+# then run with `erbridge --config config.toml <forward|serve|connect>`.
+#
+# The three modes are independent; the same config file can fill in just one section:
+#   forward  direct forwarding: external port -> internal target host:port (TCP/UDP)
+#   serve    reverse mode role A: waits for connect (B) to connect in, then exposes a port externally
+#   connect  reverse mode role B: connects to serve (A), forwards received traffic to a local target
+
+# ---- forward: can be repeated for multiple mappings ----
+[[forward]]
+name = "web"                 # optional, used only for display/log
+listen = "0.0.0.0:8080"      # externally listening address
+target = "10.0.0.5:80"       # internal target
+protocol = "both"            # tcp | udp | both (default both)
+
+[[forward]]
+name = "dns"
+listen = "0.0.0.0:5353"
+target = "10.0.0.5:53"
+protocol = "udp"
+udp_idle_secs = 60           # how long a UDP pseudo-connection can be idle before it's considered ended (default 60)
+
+# ---- serve: role A, waits for B to connect ----
+[serve]
+listen = "0.0.0.0:9000"      # control port that B connects to
+token = "change-me"          # shared secret B must provide
+# Each tunnel corresponds to one externally exposed port; the final
+# destination is decided by the [[connect.tunnel]] with the same name on B's side
+[[serve.tunnel]]
+name = "web"
+external = "0.0.0.0:8081"
+
+# ---- connect: role B, connects to A ----
+[connect]
+server = "1.2.3.4:9000"      # A's control address
+token = "change-me"          # must match serve.token
+reconnect_min_secs = 1       # starting interval for reconnect retries
+reconnect_max_secs = 30      # max interval for reconnect retries (exponential backoff)
+[[connect.tunnel]]
+name = "web"                 # must match the tunnel name on serve's side
+target = "127.0.0.1:80"      # final target on B's local machine (or internal network B can reach)
