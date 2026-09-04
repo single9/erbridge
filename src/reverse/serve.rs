@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result, bail};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
@@ -181,6 +181,18 @@ async fn handle_external_client(
     write_frame(&mut compat, tunnel.name.as_bytes())
         .await
         .context("sending tunnel header")?;
+
+    // B replies before any payload moves, so the stream gets acknowledged
+    // immediately (see the note in `connect::handle_inbound_stream`) and a
+    // failed dial on B's side is reported here instead of hanging the client.
+    let mut ready = [0u8; 1];
+    compat
+        .read_exact(&mut ready)
+        .await
+        .context("waiting for B to open the target connection")?;
+    if ready[0] != 1 {
+        bail!("B could not reach the target for tunnel '{}'", tunnel.name);
+    }
 
     let label = format!("reverse:{}", tunnel.name);
     let info = registry.open(

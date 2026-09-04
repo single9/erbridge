@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use rustls_pki_types::ServerName;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
@@ -75,7 +76,8 @@ async fn run_one_session(
         .await
         .context("sending token to A")?;
     let mut ack = [0u8; 1];
-    tokio::io::AsyncReadExt::read_exact(&mut tls_stream, &mut ack)
+    tls_stream
+        .read_exact(&mut ack)
         .await
         .context("reading token acknowledgement from A")?;
     if ack[0] != 1 {
@@ -111,10 +113,34 @@ async fn handle_inbound_stream(
         .with_context(|| format!("A requested unknown tunnel '{name}'"))?
         .clone();
 
-    let target = TcpStream::connect(&target_addr)
-        .await
-        .with_context(|| format!("connecting to local target {target_addr}"))?;
+    // Answer A as soon as the target is dialled, rather than waiting for the
+    // target to speak. Two reasons, and the second is the load-bearing one:
+    //
+    //   1. It tells A whether the dial actually succeeded, so a failure
+    //      surfaces as an error instead of an external client piping into a
+    //      stream that will never carry anything.
+    //   2. This first byte is what makes yamux attach the stream ACK. Until A
+    //      sees that ACK the stream counts against yamux's ack backlog
+    //      (`MAX_ACK_BACKLOG`, 256), and A's 257th `open_stream` blocks. With
+    //      a target that only speaks after the client does, that silently caps
+    //      the whole tunnel at 256 concurrent connections.
+    let target = match TcpStream::connect(&target_addr).await {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = compat.write_all(&[0u8]).await;
+            let _ = compat.flush().await;
+            return Err(e).with_context(|| format!("connecting to local target {target_addr}"));
+        }
+    };
     let _ = target.set_nodelay(true);
+    compat
+        .write_all(&[1u8])
+        .await
+        .context("acknowledging stream to A")?;
+    compat
+        .flush()
+        .await
+        .context("flushing stream acknowledgement to A")?;
 
     let info = registry.open(
         format!("reverse:{name}"),

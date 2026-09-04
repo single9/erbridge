@@ -1,11 +1,14 @@
 mod common;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use erbridge::config::{ConnectConfig, ConnectTunnel, ServeConfig, ServeTunnel};
 use erbridge::reverse::connect::run_connect;
 use erbridge::reverse::serve::run_serve;
 use erbridge::stats::Registry;
+use tokio::io::AsyncWriteExt;
 
 #[tokio::test]
 async fn reverse_tunnel_roundtrip() {
@@ -146,4 +149,83 @@ async fn rejects_mismatched_token() {
         "expected a token mismatch log line, got: {log:?}"
     );
     assert_eq!(serve_registry.totals().total_connections, 0);
+}
+
+/// yamux only acknowledges a stream once the accepting side sends its first
+/// bytes, and it refuses to open more than 256 streams that are still waiting
+/// for an acknowledgement. B therefore answers when it has dialled the target
+/// instead of waiting for the target to speak; without that, a target that
+/// expects the client to speak first silently capped the entire tunnel at 256
+/// concurrent connections, with connection 257 hanging forever and no error.
+#[tokio::test]
+async fn carries_more_concurrent_connections_than_the_yamux_ack_backlog() {
+    // Comfortably past yamux's 256-stream acknowledgement backlog.
+    const CONNECTIONS: usize = 300;
+
+    let target_port = common::free_port();
+    let control_port = common::free_port();
+    let external_port = common::free_port();
+
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let target_addr = format!("127.0.0.1:{target_port}").parse().unwrap();
+    tokio::spawn(common::run_silent_tcp_server(target_addr, accepted.clone()));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let serve_cfg = ServeConfig {
+        listen: format!("127.0.0.1:{control_port}"),
+        token: "burst-token".into(),
+        tunnel: vec![ServeTunnel {
+            name: "web".into(),
+            external: format!("127.0.0.1:{external_port}"),
+        }],
+    };
+    let connect_cfg = ConnectConfig {
+        server: format!("127.0.0.1:{control_port}"),
+        token: "burst-token".into(),
+        tunnel: vec![ConnectTunnel {
+            name: "web".into(),
+            target: format!("127.0.0.1:{target_port}"),
+        }],
+        reconnect_min_secs: 1,
+        reconnect_max_secs: 2,
+    };
+
+    tokio::spawn(run_serve(serve_cfg, Registry::new()));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::spawn(run_connect(connect_cfg, Registry::new()));
+
+    let external_addr: std::net::SocketAddr = format!("127.0.0.1:{external_port}").parse().unwrap();
+    let mut clients = Vec::new();
+    for _ in 0..CONNECTIONS {
+        clients.push(tokio::spawn(async move {
+            let mut stream = tokio::net::TcpStream::connect(external_addr)
+                .await
+                .expect("connect to external listener");
+            // The client speaks first and the target never answers, so nothing
+            // but B's own acknowledgement can retire the stream's ack backlog
+            // entry.
+            stream
+                .write_all(b"client speaks first")
+                .await
+                .expect("write");
+            stream // held open for the rest of the test
+        }));
+    }
+    let mut held = Vec::new();
+    for client in clients {
+        held.push(client.await.expect("client task"));
+    }
+
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while accepted.load(Ordering::SeqCst) < CONNECTIONS {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "only {} of {CONNECTIONS} connections reached the target",
+            accepted.load(Ordering::SeqCst)
+        )
+    });
 }

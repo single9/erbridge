@@ -1,6 +1,8 @@
 #![allow(dead_code)] // each test binary only exercises a subset of these helpers
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
@@ -60,4 +62,20 @@ pub async fn tcp_roundtrip(addr: SocketAddr, payload: &[u8]) -> Vec<u8> {
         .await
         .expect("read echoed payload");
     out
+}
+
+/// Accepts TCP connections forever, counting them, and holds each one open
+/// without ever writing a byte back. Models a server that waits for the client
+/// to speak first and has not answered yet -- the case where nothing on the
+/// target side would prompt the tunnel to acknowledge its streams.
+pub async fn run_silent_tcp_server(addr: SocketAddr, accepted: Arc<AtomicUsize>) {
+    let listener = TcpListener::bind(addr).await.expect("bind silent server");
+    let mut held = Vec::new();
+    loop {
+        let Ok((stream, _)) = listener.accept().await else {
+            continue;
+        };
+        accepted.fetch_add(1, Ordering::SeqCst);
+        held.push(stream);
+    }
 }

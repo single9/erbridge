@@ -11,7 +11,13 @@
 //!   3. For every new external client, A opens a yamux stream and writes a
 //!      length-prefixed tunnel-name frame identifying which `[[connect.tunnel]]`
 //!      entry on B should receive it; B reads that frame, resolves the target,
-//!      dials it, and pipes the rest of the stream unmodified.
+//!      and dials it.
+//!   4. B replies with one byte, `1` (target connected) or `0` (dial failed),
+//!      and only then is the rest of the stream piped unmodified. B must send
+//!      this before any payload: it is what carries yamux's stream ACK, and
+//!      without it a target that waits for the client to speak first would
+//!      leave streams unacknowledged and cap the tunnel at yamux's 256-stream
+//!      ack backlog.
 
 pub mod connect;
 pub mod serve;
