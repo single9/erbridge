@@ -12,7 +12,13 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// tunnelled streams don't get fragmented further downstream.
 const BUF_SIZE: usize = 16 * 1024;
 
-async fn pump<R, W>(mut r: R, mut w: W, counter: Arc<AtomicU64>) -> io::Result<()>
+/// Copies from `r` into `w` until EOF, adding to `counter` as bytes move.
+///
+/// Public because a caller sometimes has to treat the two directions of a
+/// connection differently -- reading a protocol preamble off one of them
+/// before forwarding, say -- and should still use the same copy loop that
+/// [`pipe_bidirectional_tracked`] does rather than reimplementing it.
+pub async fn pump<R, W>(mut r: R, mut w: W, counter: Arc<AtomicU64>) -> io::Result<()>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,

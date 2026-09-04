@@ -8,7 +8,7 @@ use erbridge::config::{ConnectConfig, ConnectTunnel, ServeConfig, ServeTunnel};
 use erbridge::reverse::connect::run_connect;
 use erbridge::reverse::serve::run_serve;
 use erbridge::stats::Registry;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
 async fn reverse_tunnel_roundtrip() {
@@ -228,4 +228,54 @@ async fn carries_more_concurrent_connections_than_the_yamux_ack_backlog() {
             accepted.load(Ordering::SeqCst)
         )
     });
+}
+
+/// When B cannot reach its target it answers with a rejection instead of a
+/// stream of bytes, and A has to close the external client's connection.
+/// A silent client is the case that catches this: the request direction is
+/// forwarded without waiting for B's answer, so it sits blocked on a read from
+/// the client and will never notice the failure by itself.
+#[tokio::test]
+async fn closes_the_client_when_b_cannot_reach_the_target() {
+    let control_port = common::free_port();
+    let external_port = common::free_port();
+    // Nothing ever binds this one, so B's dial is guaranteed to fail.
+    let dead_port = common::free_port();
+
+    let serve_cfg = ServeConfig {
+        listen: format!("127.0.0.1:{control_port}"),
+        token: "dead-target".into(),
+        tunnel: vec![ServeTunnel {
+            name: "web".into(),
+            external: format!("127.0.0.1:{external_port}"),
+        }],
+    };
+    let connect_cfg = ConnectConfig {
+        server: format!("127.0.0.1:{control_port}"),
+        token: "dead-target".into(),
+        tunnel: vec![ConnectTunnel {
+            name: "web".into(),
+            target: format!("127.0.0.1:{dead_port}"),
+        }],
+        reconnect_min_secs: 1,
+        reconnect_max_secs: 2,
+    };
+
+    tokio::spawn(run_serve(serve_cfg, Registry::new()));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::spawn(run_connect(connect_cfg, Registry::new()));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let external_addr: std::net::SocketAddr = format!("127.0.0.1:{external_port}").parse().unwrap();
+    let mut stream = tokio::net::TcpStream::connect(external_addr)
+        .await
+        .expect("connect to external listener");
+
+    // Deliberately send nothing at all.
+    let mut buf = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+        .await
+        .expect("A left the client hanging after B failed to reach the target")
+        .expect("reading from the external connection");
+    assert_eq!(read, 0, "expected the connection to be closed, got a byte");
 }

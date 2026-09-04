@@ -9,7 +9,7 @@ use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 
 use crate::config::{ServeConfig, ServeTunnel};
 use crate::mux::{self, MuxControl};
-use crate::proxy::pipe_bidirectional_tracked;
+use crate::proxy::pump;
 use crate::reverse::{MAX_TOKEN_LEN, constant_time_eq, read_frame, write_frame};
 use crate::stats::{Protocol, Registry};
 use crate::tls;
@@ -182,18 +182,6 @@ async fn handle_external_client(
         .await
         .context("sending tunnel header")?;
 
-    // B replies before any payload moves, so the stream gets acknowledged
-    // immediately (see the note in `connect::handle_inbound_stream`) and a
-    // failed dial on B's side is reported here instead of hanging the client.
-    let mut ready = [0u8; 1];
-    compat
-        .read_exact(&mut ready)
-        .await
-        .context("waiting for B to open the target connection")?;
-    if ready[0] != 1 {
-        bail!("B could not reach the target for tunnel '{}'", tunnel.name);
-    }
-
     let label = format!("reverse:{}", tunnel.name);
     let info = registry.open(
         label,
@@ -201,13 +189,47 @@ async fn handle_external_client(
         peer.to_string(),
         format!("B:{}", tunnel.name),
     );
-    let result = pipe_bidirectional_tracked(
-        client,
-        compat,
-        info.bytes_in.clone(),
-        info.bytes_out.clone(),
-    )
+
+    let (client_r, client_w) = tokio::io::split(client);
+    let (mut mux_r, mux_w) = tokio::io::split(compat);
+
+    // Start forwarding the client's request straight away instead of waiting
+    // for B's reply first. The two directions are otherwise symmetric, but
+    // gating this one would put a full A<->B round trip in front of every new
+    // connection -- barely visible on loopback, and an entire link RTT on the
+    // wide-area links this tunnel exists for.
+    let to_b = tokio::spawn(pump(client_r, mux_w, info.bytes_in.clone()));
+
+    // B answers with one byte once it has dialled the target (see the note in
+    // `connect::handle_inbound_stream`). It is consumed here, before anything
+    // is forwarded back, or it would reach the external client as the first
+    // byte of the response. Only this direction waits for it.
+    let mut ready = [0u8; 1];
+    let opened = async {
+        mux_r
+            .read_exact(&mut ready)
+            .await
+            .context("waiting for B to open the target connection")?;
+        if ready[0] != 1 {
+            bail!("B could not reach the target for tunnel '{}'", tunnel.name);
+        }
+        Ok::<(), anyhow::Error>(())
+    }
     .await;
+
+    if let Err(e) = opened {
+        // Nothing will ever come back on this stream, so stop feeding it and
+        // drop both halves of the client socket. Waiting on `to_b` instead
+        // would hang until the client happened to disconnect on its own.
+        to_b.abort();
+        registry.close(&info);
+        return Err(e);
+    }
+
+    let from_b = tokio::spawn(pump(mux_r, client_w, info.bytes_out.clone()));
+    let (to_b, from_b) = tokio::join!(to_b, from_b);
     registry.close(&info);
-    result.map_err(Into::into)
+    to_b.context("client -> B copy task")??;
+    from_b.context("B -> client copy task")??;
+    Ok(())
 }

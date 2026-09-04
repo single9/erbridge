@@ -13,11 +13,16 @@
 //!      entry on B should receive it; B reads that frame, resolves the target,
 //!      and dials it.
 //!   4. B replies with one byte, `1` (target connected) or `0` (dial failed),
-//!      and only then is the rest of the stream piped unmodified. B must send
-//!      this before any payload: it is what carries yamux's stream ACK, and
-//!      without it a target that waits for the client to speak first would
-//!      leave streams unacknowledged and cap the tunnel at yamux's 256-stream
-//!      ack backlog.
+//!      and the rest of the stream is then piped unmodified. B must send this
+//!      before any payload: it is what carries yamux's stream ACK, and without
+//!      it a target that waits for the client to speak first would leave
+//!      streams unacknowledged and cap the tunnel at yamux's 256-stream ack
+//!      backlog.
+//!
+//! Only A's *response* direction waits for that byte, because it has to be
+//! consumed rather than delivered to the external client. A forwards the
+//! client's request as soon as it arrives; gating that direction too would put
+//! a full A<->B round trip in front of every new connection.
 
 pub mod connect;
 pub mod serve;
