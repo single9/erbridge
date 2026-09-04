@@ -5,7 +5,7 @@ DIST_DIR     := dist
 WIN_DIST     := $(DIST_DIR)/windows
 LINUX_DIST   := $(DIST_DIR)/linux
 
-.PHONY: all build release windows linux check-mingw check-linux dist dist-windows dist-linux clean run test
+.PHONY: all build release windows linux check-mingw check-linux dist dist-windows dist-linux clean run test bench compare-tunnels
 
 all: build
 
@@ -63,6 +63,16 @@ dist: dist-windows
 
 test:
 	cargo test
+
+## Latency benchmark: baseline vs forward vs serve/connect roundtrip, HTML report in target/criterion/
+bench:
+	cargo bench --bench latency
+
+## Same ping-pong methodology, but against external tunnels (frp/rathole/bore) for comparison.
+## Needs frpc/frps/rathole/bore-cli on PATH (brew install frpc frps rathole bore-cli), or point
+## FRPC_BIN/FRPS_BIN/RATHOLE_BIN/BORE_BIN at their binaries. Missing tools are skipped, not fatal.
+compare-tunnels:
+	cargo run --release --example compare_tunnels
 
 clean:
 	cargo clean

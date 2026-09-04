@@ -120,3 +120,51 @@ See [`config.example.toml`](config.example.toml) for a complete example. The thr
 make test    # equivalent to cargo test: covers forward's TCP/UDP forwarding, UDP idle timeout,
              # and serve/connect's multiplexed forwarding and token authentication
 ```
+
+## Latency benchmark
+
+```sh
+make bench   # equivalent to: cargo bench --bench latency
+```
+
+`benches/latency.rs` measures steady-state TCP round-trip latency (a 64-byte
+ping over an already-open connection, not connection setup) across the three
+data paths, all on loopback:
+
+- `baseline_direct_tcp_roundtrip` — client <-> echo server, no erbridge
+- `forward_tcp_roundtrip` — client <-> `forward` <-> echo server
+- `reverse_tunnel_tcp_roundtrip` — client <-> `serve` (A) <=yamux/TLS=> `connect` (B) <-> echo server
+
+Criterion prints p-value-style `[low mid high]` estimates per run and writes
+an HTML report with full distributions to `target/criterion/report/index.html`.
+Compare `forward`/`reverse` against `baseline` to get erbridge's added
+latency; loopback numbers isolate erbridge's own per-message overhead but
+don't include real network RTT — for that, run the same three modes over an
+actual link and drive them with `wrk`/`hey` (HTTP) or `iperf3 -u` (UDP
+throughput/jitter) instead.
+
+### Comparing against frp / rathole / bore
+
+```sh
+make compare-tunnels   # equivalent to: cargo run --release --example compare_tunnels
+```
+
+`examples/compare_tunnels.rs` runs the same persistent-connection ping-pong
+against erbridge's `serve`/`connect` reverse tunnel and three other NAT-traversal
+tools — [frp](https://github.com/fatedier/frp), [rathole](https://github.com/rathole-org/rathole),
+and [bore](https://github.com/ekzhang/bore) — all on the same machine, same
+payload, same warmup/iteration count, so the numbers are comparable to each
+other (unlike published benchmarks elsewhere, which use different payloads,
+units, and hardware — see the caveats in the latency report). It compares
+against erbridge's *reverse* mode specifically, not `forward`, since frp/rathole/bore
+only implement the dial-out/reverse case.
+
+Needs `frpc`, `frps`, `rathole`, and `bore` on `PATH` (`brew install frpc frps
+rathole bore-cli`, or point `FRPC_BIN`/`FRPS_BIN`/`RATHOLE_BIN`/`BORE_BIN` at
+prebuilt binaries). A missing tool is skipped with a note, not fatal — the
+rest of the comparison still runs. Per-process logs land in a temp dir printed
+at the top of the output.
+
+## License
+
+[MIT](LICENSE)
