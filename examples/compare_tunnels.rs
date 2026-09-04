@@ -257,6 +257,98 @@ async fn scenario_frp(target: SocketAddr, log_dir: &std::path::Path) -> Outcome 
     }
 }
 
+/// Asks rathole for a fresh Noise keypair (`rathole --genkey`), returning
+/// (private, public). Needed because the default Noise_NK pattern wants the
+/// server's private key and the client's copy of the matching public key.
+fn rathole_genkey() -> Result<(String, String), String> {
+    let out = Command::new(bin("RATHOLE_BIN", "rathole"))
+        .arg("--genkey")
+        .output()
+        .map_err(|e| format!("running rathole --genkey: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut keys = text
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.contains("Key:"))
+        .map(|l| l.trim().to_string());
+    match (keys.next(), keys.next()) {
+        (Some(private), Some(public)) => Ok((private, public)),
+        _ => Err(format!("unexpected --genkey output: {text:?}")),
+    }
+}
+
+/// Same as `scenario_rathole`, but with rathole's Noise transport enabled, so
+/// it is encrypted like erbridge's TLS control channel rather than plaintext.
+/// This is the apples-to-apples comparison: the plaintext rathole run tells us
+/// how fast the tunnel is, this one tells us how much of erbridge's gap is
+/// encryption rather than implementation.
+async fn scenario_rathole_noise(target: SocketAddr, log_dir: &std::path::Path) -> Outcome {
+    let control_port = free_port();
+    let external_port = free_port();
+    let external_addr: SocketAddr = format!("127.0.0.1:{external_port}").parse().unwrap();
+
+    let (private_key, public_key) = match rathole_genkey() {
+        Ok(v) => v,
+        Err(e) => return Outcome::Skipped(e),
+    };
+
+    let server_toml = log_dir.join("rathole_noise_server.toml");
+    let client_toml = log_dir.join("rathole_noise_client.toml");
+    if let Err(e) = std::fs::write(
+        &server_toml,
+        format!(
+            "[server]\nbind_addr = \"127.0.0.1:{control_port}\"\ndefault_token = \"{TOKEN}\"\n\n\
+             [server.transport]\ntype = \"noise\"\n\n\
+             [server.transport.noise]\nlocal_private_key = \"{private_key}\"\n\n\
+             [server.services.bench]\nbind_addr = \"127.0.0.1:{external_port}\"\n"
+        ),
+    ) {
+        return Outcome::Skipped(format!("writing rathole_noise_server.toml: {e}"));
+    }
+    if let Err(e) = std::fs::write(
+        &client_toml,
+        format!(
+            "[client]\nremote_addr = \"127.0.0.1:{control_port}\"\ndefault_token = \"{TOKEN}\"\n\n\
+             [client.transport]\ntype = \"noise\"\n\n\
+             [client.transport.noise]\nremote_public_key = \"{public_key}\"\n\n\
+             [client.services.bench]\nlocal_addr = \"{target}\"\n"
+        ),
+    ) {
+        return Outcome::Skipped(format!("writing rathole_noise_client.toml: {e}"));
+    }
+
+    let _server = match spawn_logged(
+        Command::new(bin("RATHOLE_BIN", "rathole"))
+            .arg(&server_toml)
+            .arg("-s"),
+        "rathole_noise_server",
+        log_dir,
+    ) {
+        Ok(g) => g,
+        Err(e) => return Outcome::Skipped(e),
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _client = match spawn_logged(
+        Command::new(bin("RATHOLE_BIN", "rathole"))
+            .arg(&client_toml)
+            .arg("-c"),
+        "rathole_noise_client",
+        log_dir,
+    ) {
+        Ok(g) => g,
+        Err(e) => return Outcome::Skipped(e),
+    };
+
+    if !wait_ready(external_addr, READY_TIMEOUT).await {
+        return Outcome::Skipped(
+            "rathole+noise tunnel never became ready (see rathole_noise_*.log)".into(),
+        );
+    }
+    match measure(external_addr).await {
+        Ok(s) => Outcome::Ok(percentiles(s)),
+        Err(e) => Outcome::Skipped(e),
+    }
+}
+
 async fn scenario_rathole(target: SocketAddr, log_dir: &std::path::Path) -> Outcome {
     let control_port = free_port();
     let external_port = free_port();
@@ -388,6 +480,10 @@ async fn main() {
     ));
     results.push(("frp", scenario_frp(target, &log_dir).await));
     results.push(("rathole", scenario_rathole(target, &log_dir).await));
+    results.push((
+        "rathole+noise",
+        scenario_rathole_noise(target, &log_dir).await,
+    ));
     results.push(("bore", scenario_bore(target, &log_dir).await));
 
     let baseline_p50 = results
