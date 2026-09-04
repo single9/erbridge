@@ -1,6 +1,15 @@
 //! Measures reverse-tunnel *connection setup* latency: connect to A's external
 //! port, send a request, and wait for the first response byte. The ping-pong
 //! benchmarks all reuse one long-lived connection, so they never see this.
+//!
+//! Read the results carefully. Unlike the ping-pong benchmarks this one opens
+//! a fresh connection every iteration, which makes it far noisier: on a
+//! loaded machine the per-run minimum comes out bimodal, and repeated runs
+//! exhaust the ephemeral port range unless the pool is given time to drain
+//! (see `ITERS`). Measured here, the difference between two builds has come
+//! out with a different sign depending on which statistic you read, which
+//! means no signal -- treat a result as real only when floor, median and the
+//! tail all agree, and it is large.
 use std::time::{Duration, Instant};
 
 use erbridge::config::{ConnectConfig, ConnectTunnel, ServeConfig, ServeTunnel};
@@ -9,8 +18,13 @@ use erbridge::stats::Registry;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-const ITERS: usize = 400;
-const WARMUP: usize = 50;
+/// Each iteration burns two ephemeral ports (client->A and B->target), and
+/// they sit in TIME_WAIT for a minute afterwards. Run enough iterations and
+/// the port range runs dry, at which point `connect()` starts hunting for a
+/// free port and the measurement is timing the kernel, not the tunnel -- so
+/// keep this low and let the pool drain between runs.
+const ITERS: usize = 100;
+const WARMUP: usize = 20;
 
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
