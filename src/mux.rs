@@ -16,6 +16,28 @@ use yamux::{Connection, ConnectionError, Stream};
 
 pub use yamux::{Config as MuxConfig, Mode};
 
+/// erbridge maps one external connection to one yamux stream, so yamux's
+/// per-connection stream limit is the tunnel's concurrent-connection ceiling.
+/// The crate default of 512 is low for a port forwarder, and hitting it is not
+/// graceful: A's `open_stream` fails and B rejects the inbound stream, so the
+/// external client is dropped.
+///
+/// 4096 is the most the 1 GiB connection receive window allows, because yamux
+/// requires (and asserts) `max_connection_receive_window >= 256 KiB *
+/// max_num_streams`. The window is a cap on auto-tuned per-stream windows
+/// rather than an upfront allocation, so raising the stream count costs
+/// nothing until the streams actually exist. Both values are set explicitly so
+/// the invariant between them does not depend on the crate's defaults.
+const MAX_STREAMS: usize = 4096;
+const MAX_CONNECTION_RECEIVE_WINDOW: usize = MAX_STREAMS * 256 * 1024;
+
+fn mux_config() -> MuxConfig {
+    let mut config = MuxConfig::default();
+    config.set_max_connection_receive_window(Some(MAX_CONNECTION_RECEIVE_WINDOW));
+    config.set_max_num_streams(MAX_STREAMS);
+    config
+}
+
 #[derive(Clone)]
 pub struct MuxControl {
     open_tx: mpsc::Sender<oneshot::Sender<Result<Stream, ConnectionError>>>,
@@ -47,7 +69,7 @@ where
     let (inbound_tx, inbound_rx) = tmpsc::unbounded_channel();
 
     tokio::spawn(async move {
-        let mut conn = Connection::new(socket, MuxConfig::default(), mode);
+        let mut conn = Connection::new(socket, mux_config(), mode);
         let mut pending: std::collections::VecDeque<
             oneshot::Sender<Result<Stream, ConnectionError>>,
         > = std::collections::VecDeque::new();
