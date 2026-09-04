@@ -5,6 +5,10 @@ DIST_DIR     := dist
 WIN_DIST     := $(DIST_DIR)/windows
 LINUX_DIST   := $(DIST_DIR)/linux
 
+## compare-tunnels: rounds to run, and seconds to let the machine settle before each
+COMPARE_ROUNDS  ?= 1
+COMPARE_SETTLE  ?= 2
+
 .PHONY: all build release windows linux check-mingw check-linux dist dist-windows dist-linux clean run test bench compare-tunnels
 
 all: build
@@ -71,8 +75,22 @@ bench:
 ## Same ping-pong methodology, but against external tunnels (frp/rathole/bore) for comparison.
 ## Needs frpc/frps/rathole/bore-cli on PATH (brew install frpc frps rathole bore-cli), or point
 ## FRPC_BIN/FRPS_BIN/RATHOLE_BIN/BORE_BIN at their binaries. Missing tools are skipped, not fatal.
+##
+## The build is kept out of the measurement and the machine is given COMPARE_SETTLE seconds to
+## quiesce before each round. Measuring straight after a 24-core build, or running rounds
+## back-to-back, inflates every path by roughly 2x on a frequency-scaling (powersave) CPU --
+## unevenly enough to reorder the results, so the settle is load-bearing, not cosmetic.
+##   make compare-tunnels                     # one round
+##   make compare-tunnels COMPARE_ROUNDS=10   # ten rounds, settling between each
 compare-tunnels:
-	cargo run --release --example compare_tunnels
+	cargo build --release --example compare_tunnels
+	@echo "settling $(COMPARE_SETTLE)s before measuring..."
+	@sleep $(COMPARE_SETTLE)
+	@for i in $$(seq 1 $(COMPARE_ROUNDS)); do \
+		if [ $(COMPARE_ROUNDS) -gt 1 ]; then echo "=== round $$i/$(COMPARE_ROUNDS) ==="; fi; \
+		./target/release/examples/compare_tunnels || exit 1; \
+		if [ $$i -lt $(COMPARE_ROUNDS) ]; then sleep $(COMPARE_SETTLE); fi; \
+	done
 
 clean:
 	cargo clean
