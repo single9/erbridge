@@ -2,10 +2,10 @@ mod common;
 
 use std::time::Duration;
 
-use tokio::net::UdpSocket;
 use erbridge::config::{ForwardRule, ProtocolKind};
 use erbridge::forward::run_forward;
 use erbridge::stats::Registry;
+use tokio::net::UdpSocket;
 
 #[tokio::test]
 async fn forwards_udp_traffic_to_target() {
