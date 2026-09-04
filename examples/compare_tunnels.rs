@@ -471,20 +471,47 @@ async fn main() {
     tokio::spawn(run_echo_server(target));
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let mut results: Vec<(&str, Outcome)> = Vec::new();
-
-    results.push(("baseline (direct)", scenario_baseline(target).await));
-    results.push((
+    const SCENARIOS: [&str; 6] = [
+        "baseline (direct)",
         "erbridge (serve/connect)",
-        scenario_erbridge_reverse(target).await,
-    ));
-    results.push(("frp", scenario_frp(target, &log_dir).await));
-    results.push(("rathole", scenario_rathole(target, &log_dir).await));
-    results.push((
+        "frp",
+        "rathole",
         "rathole+noise",
-        scenario_rathole_noise(target, &log_dir).await,
-    ));
-    results.push(("bore", scenario_bore(target, &log_dir).await));
+        "bore",
+    ];
+
+    // Scenarios run back to back in one process, so a machine that ramps its
+    // clocks up (or heats up and throttles) systematically favours whichever
+    // position a scenario sits in -- a bias repetition alone cannot remove.
+    // `COMPARE_ROTATE` rotates the running order so a caller can give every
+    // scenario every position across a set of runs and cancel it out. Results
+    // are sorted back into a fixed order before printing.
+    let rotate = std::env::var("COMPARE_ROTATE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0)
+        % SCENARIOS.len();
+    let mut order: Vec<usize> = (0..SCENARIOS.len()).collect();
+    order.rotate_left(rotate);
+
+    let mut measured: Vec<(usize, Outcome)> = Vec::new();
+    for &i in &order {
+        let outcome = match i {
+            0 => scenario_baseline(target).await,
+            1 => scenario_erbridge_reverse(target).await,
+            2 => scenario_frp(target, &log_dir).await,
+            3 => scenario_rathole(target, &log_dir).await,
+            4 => scenario_rathole_noise(target, &log_dir).await,
+            5 => scenario_bore(target, &log_dir).await,
+            _ => unreachable!(),
+        };
+        measured.push((i, outcome));
+    }
+    measured.sort_by_key(|(i, _)| *i);
+    let results: Vec<(&str, Outcome)> = measured
+        .into_iter()
+        .map(|(i, outcome)| (SCENARIOS[i], outcome))
+        .collect();
 
     let baseline_p50 = results
         .iter()
