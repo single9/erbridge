@@ -13,6 +13,16 @@
 //! comparing (tls - tcp) + (yamux - tcp) against (tls+yamux - tcp) says
 //! whether the two costs are additive or whether they interact.
 //!
+//! Every derived number -- the marginal column and the summary lines -- is
+//! computed from the minimum rather than the median. Both endpoints run in
+//! this one process on a multi-thread runtime, where which worker a task lands
+//! on costs more than the layer being measured: the same plain TCP ping-pong
+//! comes out at ~11 us here against ~7 us on a current-thread runtime. That
+//! placement noise lands in the median and not in the minimum, which is the
+//! iteration where nothing got in the way. The percentile columns are still
+//! printed, but read them as a tail-behaviour check rather than as the signal
+//! -- a difference visible in p50 but not in min is scheduling, not a layer.
+//!
 //! Those four rows all use a single TCP connection, whereas a real tunnel
 //! chains three (client->A, A->B, B->target) with erbridge's copy loop at each
 //! hop, so they cannot simply be subtracted from `compare_tunnels`' erbridge
@@ -290,15 +300,15 @@ async fn main() {
 
     println!(
         "\n{:<16}{:>9}{:>9}{:>9}{:>9}{:>14}",
-        "layer", "min", "p50", "p95", "p99", "marginal p50"
+        "layer", "min", "p50", "p95", "p99", "marginal min"
     );
     println!("{}", "-".repeat(66));
     stats.sort_by_key(|(layer, _)| *layer as u8);
-    let base = stats[0].1.p50;
+    let base = stats[0].1.min;
     for (layer, s) in &stats {
         let marginal = match layer {
             Layer::Tcp => "—".to_string(),
-            _ => format!("{:+.1} µs", s.p50 - base),
+            _ => format!("{:+.1} µs", s.min - base),
         };
         println!(
             "{:<16}{:>8.1}{:>9.1}{:>9.1}{:>9.1}{:>14}",
@@ -311,10 +321,10 @@ async fn main() {
         );
     }
 
-    let p = |l: Layer| stats.iter().find(|(x, _)| *x == l).unwrap().1.p50;
-    let tls_only = p(Layer::Tls) - p(Layer::Tcp);
-    let yamux_only = p(Layer::Yamux) - p(Layer::Tcp);
-    let both = p(Layer::TlsYamux) - p(Layer::Tcp);
+    let m = |l: Layer| stats.iter().find(|(x, _)| *x == l).unwrap().1.min;
+    let tls_only = m(Layer::Tls) - m(Layer::Tcp);
+    let yamux_only = m(Layer::Yamux) - m(Layer::Tcp);
+    let both = m(Layer::TlsYamux) - m(Layer::Tcp);
     println!("\ntls alone      : {tls_only:+.1} µs");
     println!("yamux alone    : {yamux_only:+.1} µs");
     println!("both together  : {both:+.1} µs");
@@ -325,12 +335,12 @@ async fn main() {
 
     // A real tunnel is the relay topology with its middle link carrying TLS and
     // yamux, so this is what `compare_tunnels`' erbridge row should land near.
-    let relays_only = p(Layer::Relays) - p(Layer::Tcp);
+    let relays_only = m(Layer::Relays) - m(Layer::Tcp);
     println!("\n2 relays alone : {relays_only:+.1} µs");
     println!(
         "predicted full tunnel : {:.1} µs  (tcp {:.1} + relays {:+.1} + tls/yamux {:+.1})",
-        p(Layer::Tcp) + relays_only + both,
-        p(Layer::Tcp),
+        m(Layer::Tcp) + relays_only + both,
+        m(Layer::Tcp),
         relays_only,
         both
     );
