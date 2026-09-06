@@ -31,6 +31,11 @@ pub use yamux::{Config as MuxConfig, Mode};
 const MAX_STREAMS: usize = 4096;
 const MAX_CONNECTION_RECEIVE_WINDOW: usize = MAX_STREAMS * 256 * 1024;
 
+/// Write buffer sitting under the yamux connection, sized to hold a full
+/// 16 KiB frame plus the header and window-update traffic around it several
+/// times over. There is one per A<->B link, not per stream, so it is cheap.
+const WRITE_BUF_SIZE: usize = 64 * 1024;
+
 fn mux_config() -> MuxConfig {
     let mut config = MuxConfig::default();
     config.set_max_connection_receive_window(Some(MAX_CONNECTION_RECEIVE_WINDOW));
@@ -69,6 +74,13 @@ where
     let (inbound_tx, inbound_rx) = tmpsc::unbounded_channel();
 
     tokio::spawn(async move {
+        // yamux hands each frame to the socket separately, so a data frame and
+        // the window update that follows it leave as two writes -- and under
+        // TLS, as two records. Buffering underneath the connection lets them
+        // coalesce: strace puts a round trip at 4 `sendto` without this and 2
+        // with it, the same as plain TCP. yamux flushes on every pass of its
+        // driver loop before parking, so nothing is held back.
+        let socket = futures::io::BufWriter::with_capacity(WRITE_BUF_SIZE, socket);
         let mut conn = Connection::new(socket, mux_config(), mode);
         let mut pending: std::collections::VecDeque<
             oneshot::Sender<Result<Stream, ConnectionError>>,
