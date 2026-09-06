@@ -56,6 +56,13 @@ const PAYLOAD: &[u8; 64] = &[0x42; 64];
 const WARMUP: usize = 200;
 const ITERS: usize = 5000;
 
+/// Pause between passes, so one run does not inflate the next.
+const SETTLE: Duration = Duration::from_millis(500);
+
+/// Passes per layer. Samples from all of them are pooled, so the reported min
+/// is the best of `PASSES * ITERS` iterations rather than of one pass.
+const PASSES: usize = 3;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Layer {
     Tcp,
@@ -290,12 +297,24 @@ async fn main() {
         .unwrap_or(0)
         % layers.len();
     layers.rotate_left(rotate);
+
+    // Some layers come out bimodal across passes -- the plain tcp and tcp+tls
+    // rows land near either ~12 us or ~20 us depending on the pass, while the
+    // yamux and relay rows repeat to within a few tenths. A single pass that
+    // catches a layer in its slow mode moves every marginal derived from it,
+    // and the tcp row moves all of them at once. Pooling several passes per
+    // layer and taking the min over the lot settles on the floor instead.
     let mut stats = Vec::new();
     for layer in layers {
-        stats.push((layer, percentiles(measure(layer).await)));
-        // Let the machine settle between layers, for the same reason
-        // `make compare-tunnels` does: back-to-back rounds inflate everything.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut samples = Vec::new();
+        for _ in 0..PASSES {
+            samples.extend(measure(layer).await);
+            // Let the machine settle between passes, for the same reason
+            // `make compare-tunnels` does: back-to-back rounds inflate
+            // everything.
+            tokio::time::sleep(SETTLE).await;
+        }
+        stats.push((layer, percentiles(samples)));
     }
 
     println!(
