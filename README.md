@@ -96,6 +96,31 @@ make dist-osx      # lipo the two osx builds into a universal binary + config.ex
 make dist-osx-x86  # package the Intel-only osx-x86 build + config.example.toml under dist/osx/
 ```
 
+## Releases
+
+Prebuilt binaries for Windows, Linux, and macOS (universal) are published from the
+[Release workflow](.github/workflows/release.yml). Trigger it manually from the Actions tab
+("Run workflow") and pick a version bump (`patch`/`minor`/`major`); it advances the version
+tag, regenerates [`CHANGELOG.md`](CHANGELOG.md) from [Conventional Commits](https://www.conventionalcommits.org/)
+with [git-cliff](https://github.com/orhun/git-cliff) (config: [`cliff.toml`](cliff.toml)),
+builds every platform, and publishes a GitHub release with the archives, that release's
+changelog section as the release notes, plus a signed `SHA256SUMS` manifest.
+
+Verify a downloaded archive against the release:
+
+```sh
+# 1. Check the manifest itself hasn't been tampered with (keyless Sigstore signature)
+cosign verify-blob \
+  --certificate SHA256SUMS.pem \
+  --signature SHA256SUMS.sig \
+  --certificate-identity-regexp 'https://github.com/.+/\.github/workflows/release\.yml@.+' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
+
+# 2. Check the archive you downloaded matches the manifest
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
 ## Quick start
 
 ### forward: direct forwarding

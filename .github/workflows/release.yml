@@ -1,0 +1,177 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
+
+      - name: Bump version, changelog, and tag
+        id: bump
+        run: |
+          set -euo pipefail
+
+          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          LATEST_TAG=$(git tag -l 'v*.*.*' | sort -V | tail -n1 || true)
+          BASE_VERSION="${LATEST_TAG#v}"
+          BASE_VERSION="${BASE_VERSION:-$CARGO_VERSION}"
+
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
+          case "${{ inputs.bump }}" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+          NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+          NEW_TAG="v$NEW_VERSION"
+
+          sed -i -E "0,/^version = \".*\"/s//version = \"$NEW_VERSION\"/" Cargo.toml
+
+          # Cargo.lock's erbridge entry: update the version line right after the matching name line.
+          awk -v ver="$NEW_VERSION" '
+            /^name = "erbridge"$/ { print; getline; sub(/version = ".*"/, "version = \"" ver "\""); print; next }
+            { print }
+          ' Cargo.lock > Cargo.lock.new && mv Cargo.lock.new Cargo.lock
+
+          # Full project changelog (committed), and just this release's section (used as the
+          # GitHub release body) -- both generated before the tag exists, labelled as NEW_TAG.
+          git-cliff --config cliff.toml --tag "$NEW_TAG" -o CHANGELOG.md
+          git-cliff --config cliff.toml --tag "$NEW_TAG" --unreleased --strip header -o RELEASE_NOTES.md
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock CHANGELOG.md
+          git commit -m "chore(release): $NEW_TAG"
+          git tag "$NEW_TAG"
+          git push origin HEAD:${{ github.ref_name }}
+          git push origin "$NEW_TAG"
+
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: RELEASE_NOTES.md
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows
+            runs-on: ubuntu-latest
+            targets: x86_64-pc-windows-gnu
+            make-target: dist-windows
+            dist-dir: dist/windows
+          - name: linux
+            runs-on: ubuntu-latest
+            targets: x86_64-unknown-linux-musl
+            make-target: dist-linux
+            dist-dir: dist/linux
+          - name: osx
+            runs-on: macos-latest
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+            make-target: dist-osx
+            dist-dir: dist/osx
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+
+      - name: Install mingw-w64 (windows target)
+        if: matrix.name == 'windows'
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Install musl tools (linux target)
+        if: matrix.name == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - run: make ${{ matrix.make-target }}
+
+      - name: Package archive
+        id: package
+        run: |
+          set -euo pipefail
+          NAME="erbridge-${{ needs.version.outputs.version }}-${{ matrix.name }}"
+          if [ "${{ matrix.name }}" = "windows" ]; then
+            (cd "${{ matrix.dist-dir }}" && zip -r "../../$NAME.zip" .)
+            echo "path=$NAME.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar -C "${{ matrix.dist-dir }}" -czf "$NAME.tar.gz" .
+            echo "path=$NAME.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: erbridge-${{ matrix.name }}
+          path: ${{ steps.package.outputs.path }}
+
+  sign-and-release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Move release notes out of the archive dir
+        run: mv artifacts/RELEASE_NOTES.md RELEASE_NOTES.md
+
+      - name: Checksum archives
+        working-directory: artifacts
+        run: sha256sum * > SHA256SUMS
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign the checksum manifest (keyless)
+        working-directory: artifacts
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign-blob \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.pem \
+            SHA256SUMS
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ needs.version.outputs.tag }}" \
+            --title "${{ needs.version.outputs.tag }}" \
+            --notes-file RELEASE_NOTES.md \
+            artifacts/*
