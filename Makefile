@@ -1,5 +1,6 @@
 WIN_TARGET   := x86_64-pc-windows-gnu
 LINUX_TARGET := x86_64-unknown-linux-musl
+LINUX_ARM_TARGET := aarch64-unknown-linux-musl
 OSX_ARM_TARGET := aarch64-apple-darwin
 OSX_X86_TARGET := x86_64-apple-darwin
 OSX_TARGETS  := $(OSX_ARM_TARGET) $(OSX_X86_TARGET)
@@ -7,13 +8,14 @@ BIN_NAME     := erbridge
 DIST_DIR     := dist
 WIN_DIST     := $(DIST_DIR)/windows
 LINUX_DIST   := $(DIST_DIR)/linux
+LINUX_ARM_DIST := $(DIST_DIR)/linux-arm64
 OSX_DIST     := $(DIST_DIR)/osx
 
 ## compare-tunnels: rounds to run, and seconds to let the machine settle before each
 COMPARE_ROUNDS  ?= 1
 COMPARE_SETTLE  ?= 2
 
-.PHONY: all build release windows linux osx osx-arm osx-x86 check-mingw check-linux check-osx check-osx-arm check-osx-x86 dist dist-windows dist-linux dist-osx dist-osx-arm dist-osx-x86 clean run test bench compare-tunnels
+.PHONY: all build release windows linux linux-arm osx osx-arm osx-x86 check-mingw check-linux check-cross check-osx check-osx-arm check-osx-x86 dist dist-windows dist-linux dist-linux-arm dist-osx dist-osx-arm dist-osx-x86 clean run test bench compare-tunnels
 
 all: build
 
@@ -52,6 +54,19 @@ windows: check-mingw
 linux: check-linux
 	RUSTFLAGS="-C linker=rust-lld" cargo build --release --target $(LINUX_TARGET)
 	@echo "Built: target/$(LINUX_TARGET)/release/$(BIN_NAME)"
+
+## Check whether `cross` is installed (needed for the aarch64 Linux cross-compile; it builds
+## inside a Docker container with its own musl toolchain, so no local aarch64 linker is needed)
+check-cross:
+	@command -v cross >/dev/null 2>&1 || { \
+		echo "cross not found, please install it first: cargo install cross --git https://github.com/cross-rs/cross"; \
+		exit 1; \
+	}
+
+## Cross-compile the Linux aarch64 executable (release), via cross-rs/Docker
+linux-arm: check-cross
+	cross build --release --target $(LINUX_ARM_TARGET)
+	@echo "Built: target/$(LINUX_ARM_TARGET)/release/$(BIN_NAME)"
 
 ## Check whether both macOS cross-compilation targets (Apple Silicon + Intel) are installed
 check-osx:
@@ -106,6 +121,13 @@ dist-linux: linux
 	cp target/$(LINUX_TARGET)/release/$(BIN_NAME) $(LINUX_DIST)/
 	cp config.example.toml $(LINUX_DIST)/
 	@echo "Packaged to $(LINUX_DIST)/"
+
+## Package the Linux aarch64 executable together with the example config into dist/linux-arm64/ for deployment
+dist-linux-arm: linux-arm
+	mkdir -p $(LINUX_ARM_DIST)
+	cp target/$(LINUX_ARM_TARGET)/release/$(BIN_NAME) $(LINUX_ARM_DIST)/
+	cp config.example.toml $(LINUX_ARM_DIST)/
+	@echo "Packaged to $(LINUX_ARM_DIST)/"
 
 ## Combine the Apple Silicon and Intel builds into a universal binary, packaged with the example
 ## config into dist/osx/ for deployment

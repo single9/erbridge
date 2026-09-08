@@ -89,17 +89,21 @@ Cross-compilation (mirrors the other Rust sub-projects in this repo):
 ```sh
 make windows   # -> target/x86_64-pc-windows-gnu/release/erbridge.exe (on macOS, first: brew install mingw-w64)
 make linux     # -> target/x86_64-unknown-linux-musl/release/erbridge
+make linux-arm # -> target/aarch64-unknown-linux-musl/release/erbridge (needs `cross`: cargo install cross --git https://github.com/cross-rs/cross; builds via Docker)
 make osx       # -> universal (Apple Silicon + Intel) build, one binary per arch under target/<target>/release/erbridge
+make osx-arm   # -> target/aarch64-apple-darwin/release/erbridge (Apple Silicon only, no lipo)
 make osx-x86   # -> target/x86_64-apple-darwin/release/erbridge (Intel only, no lipo)
-make dist      # package the Windows executable + config.example.toml into dist/windows/
+make dist          # package the Windows executable + config.example.toml into dist/windows/
+make dist-linux-arm # package the aarch64 Linux build + config.example.toml into dist/linux-arm64/
 make dist-osx      # lipo the two osx builds into a universal binary + config.example.toml under dist/osx/
+make dist-osx-arm  # package the Apple-Silicon-only osx-arm build + config.example.toml under dist/osx/
 make dist-osx-x86  # package the Intel-only osx-x86 build + config.example.toml under dist/osx/
 ```
 
 ## Releases
 
-Prebuilt binaries for Windows, Linux, and macOS (universal, plus separate arm64/x86_64-only
-archives) are published from the
+Prebuilt binaries for Windows (x86_64), Linux (x86_64 and arm64), and macOS (universal, plus
+separate arm64/x86_64-only archives) are published from the
 [Release workflow](.github/workflows/release.yml). Trigger it manually from the Actions tab
 ("Run workflow") and pick a version bump (`patch`/`minor`/`major`); it advances the version
 tag, regenerates [`CHANGELOG.md`](CHANGELOG.md) from [Conventional Commits](https://www.conventionalcommits.org/)

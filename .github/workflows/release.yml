@@ -93,6 +93,11 @@ jobs:
             targets: x86_64-unknown-linux-musl
             make-target: dist-linux
             dist-dir: dist/linux
+          - name: linux-arm64
+            runs-on: ubuntu-latest
+            targets: aarch64-unknown-linux-musl
+            make-target: dist-linux-arm
+            dist-dir: dist/linux-arm64
           - name: osx
             runs-on: macos-latest
             targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -125,6 +130,12 @@ jobs:
       - name: Install musl tools (linux target)
         if: matrix.name == 'linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install cross (linux-arm64 target, cross-compiles via Docker)
+        if: matrix.name == 'linux-arm64'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
       - run: make ${{ matrix.make-target }}
 
