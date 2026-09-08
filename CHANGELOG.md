@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.1.1] - 2026-09-08
 
 ### Benchmarks
 
@@ -23,6 +23,10 @@ All notable changes to this project are documented in this file.
 
 - Enable thin LTO in the release profile
 - Add osx and osx-x86 make targets
+
+### CI
+
+- Add manual release workflow with cross-platform builds and signing
 
 ### Features
 
