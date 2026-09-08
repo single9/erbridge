@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.4] - 2026-09-08
+
+### Build
+
+- Cross-compile Linux aarch64 via cross-rs, publish it in releases
+
 ## [0.1.3] - 2026-09-08
 
 ### Build
