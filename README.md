@@ -2,9 +2,10 @@
 
 Low-latency TCP/UDP port forwarder with a built-in reverse-connection (NAT traversal) mode and a live traffic-monitoring TUI.
 
-## Three modes
+## Four modes
 
-- **forward**: Direct forwarding, `external port -> internal target host:port`, supports TCP/UDP simultaneously, multiple mappings can be configured at once.
+- **forward**: Direct forwarding, `external port -> internal target host:port`, supports TCP/UDP simultaneously, multiple mappings can be configured at once. A per-mapping `secure`/`/tls` option can wrap the external (listen-side) TCP leg in TLS, optionally with a `token` (same scheme as `serve`/`connect`) so only an authenticated peer can connect.
+- **client**: Companion to a `secure` forward mapping. Listens locally in plaintext and, for every connection, dials that mapping over TLS (presenting its `token` if one is set), so a plain local client doesn't need its own TLS support to reach it.
 - **serve** (reverse mode, role A): Listens and waits for `connect` (B) to connect in; traffic received on the externally exposed port is then multiplexed and forwarded to B over that A↔B connection.
 - **connect** (reverse mode, role B): Actively connects to `serve` (A); every time A receives a new external connection, it opens a new multiplexed stream over the same connection, and B decides which local (or B-reachable internal) target to forward to based on the tunnel name carried by the stream.
 
@@ -19,6 +20,33 @@ Suitable scenario: A sits in front of the public network/firewall while B (the i
  |   client   | <----------- |   -> 10.0.0.5:80        | <----------- |   target   |
  |            |              | (--map / [[forward]])   |              |            |
  +------------+              +-------------------------+              +------------+
+```
+
+With `secure`/`/tls` set on a mapping, the listen-side leg is TLS-wrapped (self-signed
+cert, generated at startup); the erbridge-to-target leg is unchanged and stays plaintext:
+
+```
+ external client                   erbridge forward                  internal target
+ +------------+              +-------------------------+              +------------+
+ |            | ===TLS=====> | listen 0.0.0.0:8443     | -----------> |            |
+ |   client   | <===TLS===== |   -> 10.0.0.5:80        | <----------- |   target   |
+ |            |              | (secure = true)         |              |            |
+ +------------+              +-------------------------+              +------------+
+```
+
+If the mapping also sets a `token`, a plain TLS client (`curl -k`, ...) can no longer
+connect on its own — it also has to speak the token handshake right after the TLS
+handshake. Use `client` mode as that connecting peer instead, so your own app keeps
+talking plaintext to a local port:
+
+```
+ your app        erbridge client                erbridge forward (on A)             internal target
+ +--------+   +------------------------+   +---------------------------+            +------------+
+ |        |-->| listen 127.0.0.1:1080  |==>| listen 0.0.0.0:8443       |----------->|            |
+ | client |<--|   -> A_IP:8443         |<==|   -> 10.0.0.5:80          |<-----------|   target   |
+ |        |   | (--token change-me)    |   | (secure=true, token=...) |            |            |
+ +--------+   +------------------------+   +---------------------------+            +------------+
+                          TLS + token handshake
 ```
 
 ### serve / connect connection diagram
@@ -78,9 +106,45 @@ erbridge forward --map "8080->10.0.0.5:80"          # forwards TCP+UDP by defaul
 erbridge forward --map "5353->10.0.0.5:53/udp"      # UDP only
 erbridge forward --map "8080->10.0.0.5:80" --map "5353->10.0.0.5:53/udp"
 
+# Secure forward: wraps the listen-side TCP connection in TLS, so
+# external client -> erbridge is encrypted; erbridge -> target stays plaintext.
+# `/tls` is shorthand for `/tcp+tls` (secure only supports tcp, not udp/both).
+erbridge forward --map "8443->10.0.0.5:80/tls"
+```
+
+The cert is a fresh self-signed one generated on every start (same trust model as
+`serve`/`connect` — see Security notes below), so a client connecting to it must
+skip certificate verification:
+
+```sh
+curl -k https://<erbridge_host>:8443/...
+openssl s_client -connect <erbridge_host>:8443
+```
+
+```sh
 # Or use a config file (can describe multiple mappings at once, see config.example.toml)
 erbridge --config config.toml forward
 ```
+
+### client: reach a secure forward mapping without your own TLS support
+
+Add `--token` on the secure mapping to also require authentication (same length-prefixed,
+constant-time-compared token as `serve`/`connect`) — after that, only `client` mode (or
+something implementing the same handshake) can connect, not a bare TLS client:
+
+```sh
+# on A (the secure forward mapping, now token-gated):
+erbridge forward --map "8443->10.0.0.5:80/tls" --token change-me
+```
+
+```sh
+# on your computer: local plaintext port -> TLS + token -> A's mapping
+erbridge client --map "1080->A_IP:8443" --token change-me
+```
+
+Your app then just talks plaintext to `127.0.0.1:1080`; `client` handles the TLS
+handshake and token exchange to A on its behalf. Repeat `--map` for multiple mappings;
+see the `[[client]]` section in `config.example.toml` for the config-file form.
 
 ### serve / connect: reverse connection
 
@@ -114,15 +178,20 @@ erbridge --headless --log-file /var/log/erbridge.log serve --config config.toml
 
 The A↔B connection in reverse mode is encrypted with an auto-generated self-signed TLS certificate; authentication relies on a shared token compared after the connection is established, not on a certificate chain — this design avoids requiring users to manage certificates. This means TLS here only provides confidentiality/integrity and does **not** verify peer identity; if the network between A and B is itself untrusted (no VPN or other trusted underlying channel), a man-in-the-middle that can intercept traffic can also obtain the token. This is fine to use over an internal network or an existing VPN; if you need to cross an untrusted network, it is recommended to add an additional trusted channel on top.
 
+`forward`'s optional `secure`/`/tls` mode uses the same self-signed, unauthenticated-identity TLS: it stops passive eavesdropping on the external-client-to-erbridge leg but does not prove erbridge's identity to the client, so a client connecting to it should expect (and typically must configure itself to accept) a certificate it cannot otherwise verify. It only covers that one leg — TCP only, since TLS has no UDP equivalent here — the erbridge-to-target leg remains plaintext.
+
+Adding a `token` to a secure mapping layers on the same post-handshake, constant-time-compared token check `serve`/`connect` uses — it restricts *who* can connect (only a peer that knows the token and speaks the same length-prefixed frame, i.e. `client` mode), but doesn't change what the TLS layer itself does or doesn't prove; the same caveats above still apply.
+
 ## Config file
 
-See [`config.example.toml`](config.example.toml) for a complete example. The three sections are independent of each other; the same config file can fill in just one section or all of them. CLI arguments (`--listen`/`--token`/`--server`/`--map`/`--tunnel`) can override or supplement the config file's contents.
+See [`config.example.toml`](config.example.toml) for a complete example. The sections are independent of each other; the same config file can fill in just one section or all of them. CLI arguments (`--listen`/`--token`/`--server`/`--map`/`--tunnel`) can override or supplement the config file's contents.
 
 ## Tests
 
 ```sh
 make test    # equivalent to cargo test: covers forward's TCP/UDP forwarding, UDP idle timeout,
-             # and serve/connect's multiplexed forwarding and token authentication
+             # secure/token-gated forward mappings, client mode against them, and serve/connect's
+             # multiplexed forwarding and token authentication
 ```
 
 ## Latency benchmark

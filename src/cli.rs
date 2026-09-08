@@ -30,10 +30,34 @@ pub struct Cli {
 pub enum Command {
     /// Direct forwarding: external listen port(s) -> internal target(s).
     Forward {
-        /// Ad-hoc mapping, repeatable: LISTEN->TARGET[/tcp|udp|both].
+        /// Ad-hoc mapping, repeatable: LISTEN->TARGET[/tcp|udp|both], where
+        /// proto can add a `+tls` modifier (or bare `tls` for `tcp+tls`) to
+        /// wrap that mapping's listen side in TLS.
         /// LISTEN may be a bare port (binds 0.0.0.0) or host:port.
         #[arg(long = "map", value_name = "LISTEN->TARGET[/proto]")]
         maps: Vec<String>,
+        /// Required token for every `+tls`-secured mapping above (applies to
+        /// all of them); only erbridge's own `client` mode (or the same
+        /// handshake) can then connect. Omit to let any TLS client connect,
+        /// same as today.
+        #[arg(long)]
+        token: Option<String>,
+    },
+
+    /// Companion to a `forward` mapping secured with `+tls` (optionally
+    /// `--token`): listens locally in plaintext, and for every connection
+    /// dials the secured mapping over TLS, presents the token if configured,
+    /// then relays bytes -- so a plain local client doesn't need its own TLS
+    /// support to reach a `secure` forward mapping.
+    Client {
+        /// Ad-hoc mapping, repeatable: LOCAL_LISTEN->SERVER_ADDR.
+        /// LOCAL_LISTEN may be a bare port (binds 127.0.0.1) or host:port.
+        #[arg(long = "map", value_name = "LOCAL_LISTEN->SERVER_ADDR")]
+        maps: Vec<String>,
+        /// Token to present to the secured mapping (applies to all of them
+        /// above); must match its `--token`/`token`.
+        #[arg(long)]
+        token: Option<String>,
     },
 
     /// Reverse tunnel role A: wait for `connect` (B) to dial in, then expose

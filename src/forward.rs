@@ -8,12 +8,21 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
+use tokio_rustls::TlsAcceptor;
 
 use crate::config::{ForwardRule, ProtocolKind};
 use crate::proxy::pipe_bidirectional_tracked;
+use crate::reverse::{MAX_TOKEN_LEN, constant_time_eq, read_frame};
 use crate::stats::{ConnectionInfo, Protocol, Registry};
+use crate::tls;
+
+/// Object-safe alias so a plain `TcpStream` and a `TlsStream<TcpStream>` can
+/// share one code path through [`pipe_bidirectional_tracked`].
+trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncStream for T {}
 
 pub async fn run_forward(rules: Vec<ForwardRule>, registry: Registry) -> Result<()> {
     if rules.is_empty() {
@@ -58,9 +67,19 @@ async fn run_tcp_forward(rule: ForwardRule, registry: Registry) -> Result<()> {
     let listener = TcpListener::bind(&rule.listen)
         .await
         .with_context(|| format!("binding TCP listener on {}", rule.listen))?;
+
+    let acceptor = if rule.secure {
+        tls::install_crypto_provider();
+        let cert = tls::generate_self_signed()?;
+        Some(TlsAcceptor::from(tls::server_tls_config(&cert)?))
+    } else {
+        None
+    };
+
     registry.info(format!(
-        "forward[{}] tcp listening on {} -> {}",
+        "forward[{}] tcp{} listening on {} -> {}",
         rule.label(),
+        if rule.secure { " (tls)" } else { "" },
         rule.listen,
         rule.target
     ));
@@ -69,8 +88,9 @@ async fn run_tcp_forward(rule: ForwardRule, registry: Registry) -> Result<()> {
         let (client, peer) = listener.accept().await?;
         let rule = rule.clone();
         let registry = registry.clone();
+        let acceptor = acceptor.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_tcp_conn(client, peer, &rule, &registry).await {
+            if let Err(e) = handle_tcp_conn(client, peer, &rule, &registry, acceptor).await {
                 registry.error(format!("forward[{}] tcp {peer}: {e:#}", rule.label()));
             }
         });
@@ -82,8 +102,31 @@ async fn handle_tcp_conn(
     peer: SocketAddr,
     rule: &ForwardRule,
     registry: &Registry,
+    acceptor: Option<TlsAcceptor>,
 ) -> Result<()> {
     let _ = client.set_nodelay(true);
+
+    let client: Box<dyn AsyncStream> = match acceptor {
+        Some(acceptor) => {
+            let mut tls_stream = acceptor
+                .accept(client)
+                .await
+                .context("TLS handshake with client failed")?;
+            if let Some(token) = &rule.token {
+                let presented = read_frame(&mut tls_stream, MAX_TOKEN_LEN)
+                    .await
+                    .context("reading token from client")?;
+                if !constant_time_eq(&presented, token.as_bytes()) {
+                    let _ = tls_stream.write_all(&[0u8]).await;
+                    anyhow::bail!("token mismatch from {peer}");
+                }
+                tls_stream.write_all(&[1u8]).await?;
+            }
+            Box::new(tls_stream)
+        }
+        None => Box::new(client),
+    };
+
     let target = TcpStream::connect(&rule.target)
         .await
         .with_context(|| format!("connecting to target {}", rule.target))?;

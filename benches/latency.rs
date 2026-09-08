@@ -101,6 +101,8 @@ fn bench_forward(c: &mut Criterion, rt: &Runtime) {
         target: format!("127.0.0.1:{target_port}"),
         protocol: ProtocolKind::Tcp,
         udp_idle_secs: 60,
+        secure: false,
+        token: None,
     };
     let stream = rt.block_on(async move {
         tokio::spawn(run_echo_server(target_addr));

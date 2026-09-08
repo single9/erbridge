@@ -5,10 +5,11 @@ use clap::Parser;
 
 use erbridge::cli::{Cli, Command};
 use erbridge::config::{
-    self, ConnectConfig, ConnectTunnel, FileConfig, ForwardRule, ServeConfig, ServeTunnel,
+    self, ClientRule, ConnectConfig, ConnectTunnel, FileConfig, ForwardRule, ServeConfig,
+    ServeTunnel,
 };
 use erbridge::stats::Registry;
-use erbridge::{forward, reverse, tui};
+use erbridge::{client, forward, reverse, tui};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -47,9 +48,13 @@ async fn main() -> Result<()> {
 
 async fn run_command(command: Command, file_cfg: FileConfig, registry: Registry) -> Result<()> {
     match command {
-        Command::Forward { maps } => {
-            let rules = resolve_forward(&file_cfg, &maps)?;
+        Command::Forward { maps, token } => {
+            let rules = resolve_forward(&file_cfg, &maps, token)?;
             forward::run_forward(rules, registry).await
+        }
+        Command::Client { maps, token } => {
+            let rules = resolve_client(&file_cfg, &maps, token)?;
+            client::run_client(rules, registry).await
         }
         Command::Serve {
             listen,
@@ -70,10 +75,42 @@ async fn run_command(command: Command, file_cfg: FileConfig, registry: Registry)
     }
 }
 
-fn resolve_forward(file_cfg: &FileConfig, cli_maps: &[String]) -> Result<Vec<ForwardRule>> {
+fn resolve_forward(
+    file_cfg: &FileConfig,
+    cli_maps: &[String],
+    cli_token: Option<String>,
+) -> Result<Vec<ForwardRule>> {
     let mut rules = file_cfg.forward.clone();
     for raw in cli_maps {
         rules.push(config::parse_map_flag(raw)?);
+    }
+    // `--token` applies to every `+tls`-secured mapping from this invocation
+    // that doesn't already carry its own token from the config file.
+    if let Some(token) = cli_token {
+        for rule in &mut rules {
+            if rule.secure && rule.token.is_none() {
+                rule.token = Some(token.clone());
+            }
+        }
+    }
+    Ok(rules)
+}
+
+fn resolve_client(
+    file_cfg: &FileConfig,
+    cli_maps: &[String],
+    cli_token: Option<String>,
+) -> Result<Vec<ClientRule>> {
+    let mut rules = file_cfg.client.clone();
+    for raw in cli_maps {
+        rules.push(config::parse_client_map_flag(raw)?);
+    }
+    if let Some(token) = cli_token {
+        for rule in &mut rules {
+            if rule.token.is_none() {
+                rule.token = Some(token.clone());
+            }
+        }
     }
     Ok(rules)
 }

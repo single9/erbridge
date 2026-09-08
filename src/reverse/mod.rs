@@ -31,10 +31,10 @@ use std::io;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-const MAX_TOKEN_LEN: usize = 4096;
+pub(crate) const MAX_TOKEN_LEN: usize = 4096;
 const MAX_NAME_LEN: usize = 256;
 
-async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, data: &[u8]) -> io::Result<()> {
+pub(crate) async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, data: &[u8]) -> io::Result<()> {
     let len: u16 = data
         .len()
         .try_into()
@@ -44,7 +44,10 @@ async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, data: &[u8]) -> io::Resul
     w.flush().await
 }
 
-async fn read_frame<R: AsyncRead + Unpin>(r: &mut R, max_len: usize) -> io::Result<Vec<u8>> {
+pub(crate) async fn read_frame<R: AsyncRead + Unpin>(
+    r: &mut R,
+    max_len: usize,
+) -> io::Result<Vec<u8>> {
     let mut len_buf = [0u8; 2];
     r.read_exact(&mut len_buf).await?;
     let len = u16::from_be_bytes(len_buf) as usize;
@@ -62,7 +65,7 @@ async fn read_frame<R: AsyncRead + Unpin>(r: &mut R, max_len: usize) -> io::Resu
 /// Compares two byte strings in time proportional only to their length, not
 /// to the position of the first mismatch, so a failed token check does not
 /// leak timing information about how much of the token was guessed correctly.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

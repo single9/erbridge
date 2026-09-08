@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
+use tokio_rustls::TlsConnector;
 
 /// Binds an ephemeral port, reads its number, then releases it. There's an
 /// inherent (tiny) race between releasing and the caller rebinding, but it's
@@ -54,6 +55,30 @@ pub async fn tcp_roundtrip(addr: SocketAddr, payload: &[u8]) -> Vec<u8> {
     let mut stream = tokio::net::TcpStream::connect(addr)
         .await
         .expect("connect to forwarded port");
+    stream.write_all(payload).await.expect("write payload");
+    stream.shutdown().await.expect("shutdown write half");
+    let mut out = Vec::new();
+    stream
+        .read_to_end(&mut out)
+        .await
+        .expect("read echoed payload");
+    out
+}
+
+/// Same as [`tcp_roundtrip`] but over TLS, accepting the forward listener's
+/// self-signed cert the same way `connect` accepts `serve`'s (see `tls`
+/// module docs: confidentiality, not peer identity).
+pub async fn tls_roundtrip(addr: SocketAddr, payload: &[u8]) -> Vec<u8> {
+    erbridge::tls::install_crypto_provider();
+    let connector = TlsConnector::from(erbridge::tls::client_tls_config().unwrap());
+    let tcp = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect to forwarded port");
+    let server_name = rustls_pki_types::ServerName::try_from("erbridge").unwrap();
+    let mut stream = connector
+        .connect(server_name, tcp)
+        .await
+        .expect("tls handshake");
     stream.write_all(payload).await.expect("write payload");
     stream.shutdown().await.expect("shutdown write half");
     let mut out = Vec::new();

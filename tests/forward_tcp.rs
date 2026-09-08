@@ -21,6 +21,8 @@ async fn forwards_tcp_traffic_to_target() {
         target: format!("127.0.0.1:{target_port}"),
         protocol: ProtocolKind::Tcp,
         udp_idle_secs: 60,
+        secure: false,
+        token: None,
     };
     let registry = Registry::new();
     tokio::spawn(run_forward(vec![rule], registry.clone()));
@@ -33,6 +35,36 @@ async fn forwards_tcp_traffic_to_target() {
     let totals = registry.totals();
     assert_eq!(totals.total_connections, 1);
     assert!(totals.bytes_in >= "hello over tcp forward".len() as u64);
+}
+
+#[tokio::test]
+async fn forwards_tls_tcp_traffic_to_plaintext_target() {
+    let target_port = common::free_port();
+    let listen_port = common::free_port();
+    let target_addr = format!("127.0.0.1:{target_port}").parse().unwrap();
+
+    tokio::spawn(common::run_tcp_echo_server(target_addr));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let rule = ForwardRule {
+        name: Some("secure-test".into()),
+        listen: format!("127.0.0.1:{listen_port}"),
+        target: format!("127.0.0.1:{target_port}"),
+        protocol: ProtocolKind::Tcp,
+        udp_idle_secs: 60,
+        secure: true,
+        token: None,
+    };
+    let registry = Registry::new();
+    tokio::spawn(run_forward(vec![rule], registry.clone()));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let listen_addr = format!("127.0.0.1:{listen_port}").parse().unwrap();
+    let echoed = common::tls_roundtrip(listen_addr, b"hello over tls forward").await;
+    assert_eq!(echoed, b"hello over tls forward");
+
+    let totals = registry.totals();
+    assert_eq!(totals.total_connections, 1);
 }
 
 #[tokio::test]
@@ -50,6 +82,8 @@ async fn forwards_multiple_concurrent_tcp_connections() {
         target: format!("127.0.0.1:{target_port}"),
         protocol: ProtocolKind::Tcp,
         udp_idle_secs: 60,
+        secure: false,
+        token: None,
     };
     let registry = Registry::new();
     tokio::spawn(run_forward(vec![rule], registry.clone()));

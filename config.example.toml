@@ -1,10 +1,11 @@
 # Example erbridge config file. Copy it to config.toml and edit as needed,
 # then run with `erbridge --config config.toml <forward|serve|connect>`.
 #
-# The three modes are independent; the same config file can fill in just one section:
+# The sections are independent; the same config file can fill in just one:
 #   forward  direct forwarding: external port -> internal target host:port (TCP/UDP)
 #   serve    reverse mode role A: waits for connect (B) to connect in, then exposes a port externally
 #   connect  reverse mode role B: connects to serve (A), forwards received traffic to a local target
+#   client   companion to a `secure = true` forward mapping: local plaintext listener -> TLS -> that mapping
 
 # ---- forward: can be repeated for multiple mappings ----
 [[forward]]
@@ -19,6 +20,25 @@ listen = "0.0.0.0:5353"
 target = "10.0.0.5:53"
 protocol = "udp"
 udp_idle_secs = 60           # how long a UDP pseudo-connection can be idle before it's considered ended (default 60)
+
+[[forward]]
+name = "secure-web"
+listen = "0.0.0.0:8443"
+target = "10.0.0.5:80"       # this leg (erbridge -> target) stays plaintext
+protocol = "tcp"             # secure only supports tcp, not udp/both
+secure = true                # wraps the listen-side connection in TLS (self-signed, generated at startup;
+                              # same trust model as serve/connect -- see README's Security notes)
+token = "change-me"          # optional: if set, the connecting side must present this token right
+                              # after the TLS handshake (same scheme as serve/connect), so only
+                              # erbridge's own `client` mode (or the same handshake) can connect --
+                              # otherwise any TLS client (curl -k, openssl s_client, ...) works
+
+# ---- client: companion to a `secure = true` forward mapping above, can be repeated ----
+[[client]]
+name = "secure-web"
+listen = "127.0.0.1:1080"    # local plaintext address your own client app connects to
+server = "A_IP:8443"         # the secured forward mapping's external address
+token = "change-me"          # must match that mapping's token, if it set one
 
 # ---- serve: role A, waits for B to connect ----
 [serve]
