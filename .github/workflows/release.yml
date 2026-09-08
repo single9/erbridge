@@ -98,6 +98,16 @@ jobs:
             targets: aarch64-apple-darwin,x86_64-apple-darwin
             make-target: dist-osx
             dist-dir: dist/osx
+          - name: osx-arm64
+            runs-on: macos-latest
+            targets: aarch64-apple-darwin
+            make-target: dist-osx-arm
+            dist-dir: dist/osx
+          - name: osx-x86_64
+            runs-on: macos-latest
+            targets: x86_64-apple-darwin
+            make-target: dist-osx-x86
+            dist-dir: dist/osx
     runs-on: ${{ matrix.runs-on }}
     steps:
       - uses: actions/checkout@v4

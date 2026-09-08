@@ -98,7 +98,8 @@ make dist-osx-x86  # package the Intel-only osx-x86 build + config.example.toml 
 
 ## Releases
 
-Prebuilt binaries for Windows, Linux, and macOS (universal) are published from the
+Prebuilt binaries for Windows, Linux, and macOS (universal, plus separate arm64/x86_64-only
+archives) are published from the
 [Release workflow](.github/workflows/release.yml). Trigger it manually from the Actions tab
 ("Run workflow") and pick a version bump (`patch`/`minor`/`major`); it advances the version
 tag, regenerates [`CHANGELOG.md`](CHANGELOG.md) from [Conventional Commits](https://www.conventionalcommits.org/)

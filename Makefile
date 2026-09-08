@@ -13,7 +13,7 @@ OSX_DIST     := $(DIST_DIR)/osx
 COMPARE_ROUNDS  ?= 1
 COMPARE_SETTLE  ?= 2
 
-.PHONY: all build release windows linux osx osx-x86 check-mingw check-linux check-osx check-osx-x86 dist dist-windows dist-linux dist-osx dist-osx-x86 clean run test bench compare-tunnels
+.PHONY: all build release windows linux osx osx-arm osx-x86 check-mingw check-linux check-osx check-osx-arm check-osx-x86 dist dist-windows dist-linux dist-osx dist-osx-arm dist-osx-x86 clean run test bench compare-tunnels
 
 all: build
 
@@ -69,6 +69,18 @@ osx: check-osx
 	done
 	@echo "Built: $(foreach t,$(OSX_TARGETS),target/$(t)/release/$(BIN_NAME))"
 
+## Check whether the Apple Silicon macOS cross-compilation target is installed
+check-osx-arm:
+	@rustup target list --installed | grep -q '^$(OSX_ARM_TARGET)$$' || { \
+		echo "rustup target $(OSX_ARM_TARGET) not found, please install it first: rustup target add $(OSX_ARM_TARGET)"; \
+		exit 1; \
+	}
+
+## Cross-compile the Apple Silicon macOS executable only (release)
+osx-arm: check-osx-arm
+	cargo build --release --target $(OSX_ARM_TARGET)
+	@echo "Built: target/$(OSX_ARM_TARGET)/release/$(BIN_NAME)"
+
 ## Check whether the Intel macOS cross-compilation target is installed
 check-osx-x86:
 	@rustup target list --installed | grep -q '^$(OSX_X86_TARGET)$$' || { \
@@ -102,6 +114,13 @@ dist-osx: osx
 	lipo -create -output $(OSX_DIST)/$(BIN_NAME) $(foreach t,$(OSX_TARGETS),target/$(t)/release/$(BIN_NAME))
 	cp config.example.toml $(OSX_DIST)/
 	@echo "Packaged universal binary to $(OSX_DIST)/"
+
+## Package the Apple Silicon macOS executable together with the example config into dist/osx/ for deployment
+dist-osx-arm: osx-arm
+	mkdir -p $(OSX_DIST)
+	cp target/$(OSX_ARM_TARGET)/release/$(BIN_NAME) $(OSX_DIST)/
+	cp config.example.toml $(OSX_DIST)/
+	@echo "Packaged to $(OSX_DIST)/"
 
 ## Package the Intel macOS executable together with the example config into dist/osx/ for deployment
 dist-osx-x86: osx-x86
