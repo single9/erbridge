@@ -61,7 +61,11 @@ Cross-compilation (mirrors the other Rust sub-projects in this repo):
 ```sh
 make windows   # -> target/x86_64-pc-windows-gnu/release/erbridge.exe (on macOS, first: brew install mingw-w64)
 make linux     # -> target/x86_64-unknown-linux-musl/release/erbridge
+make osx       # -> universal (Apple Silicon + Intel) build, one binary per arch under target/<target>/release/erbridge
+make osx-x86   # -> target/x86_64-apple-darwin/release/erbridge (Intel only, no lipo)
 make dist      # package the Windows executable + config.example.toml into dist/windows/
+make dist-osx      # lipo the two osx builds into a universal binary + config.example.toml under dist/osx/
+make dist-osx-x86  # package the Intel-only osx-x86 build + config.example.toml under dist/osx/
 ```
 
 ## Quick start

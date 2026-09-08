@@ -1,15 +1,19 @@
 WIN_TARGET   := x86_64-pc-windows-gnu
 LINUX_TARGET := x86_64-unknown-linux-musl
+OSX_ARM_TARGET := aarch64-apple-darwin
+OSX_X86_TARGET := x86_64-apple-darwin
+OSX_TARGETS  := $(OSX_ARM_TARGET) $(OSX_X86_TARGET)
 BIN_NAME     := erbridge
 DIST_DIR     := dist
 WIN_DIST     := $(DIST_DIR)/windows
 LINUX_DIST   := $(DIST_DIR)/linux
+OSX_DIST     := $(DIST_DIR)/osx
 
 ## compare-tunnels: rounds to run, and seconds to let the machine settle before each
 COMPARE_ROUNDS  ?= 1
 COMPARE_SETTLE  ?= 2
 
-.PHONY: all build release windows linux check-mingw check-linux dist dist-windows dist-linux clean run test bench compare-tunnels
+.PHONY: all build release windows linux osx osx-x86 check-mingw check-linux check-osx check-osx-x86 dist dist-windows dist-linux dist-osx dist-osx-x86 clean run test bench compare-tunnels
 
 all: build
 
@@ -49,6 +53,34 @@ linux: check-linux
 	RUSTFLAGS="-C linker=rust-lld" cargo build --release --target $(LINUX_TARGET)
 	@echo "Built: target/$(LINUX_TARGET)/release/$(BIN_NAME)"
 
+## Check whether both macOS cross-compilation targets (Apple Silicon + Intel) are installed
+check-osx:
+	@for t in $(OSX_TARGETS); do \
+		rustup target list --installed | grep -q "^$$t$$" || { \
+			echo "rustup target $$t not found, please install it first: rustup target add $$t"; \
+			exit 1; \
+		}; \
+	done
+
+## Build both macOS architectures (release); dist-osx lipo's them into a universal binary
+osx: check-osx
+	@for t in $(OSX_TARGETS); do \
+		cargo build --release --target $$t; \
+	done
+	@echo "Built: $(foreach t,$(OSX_TARGETS),target/$(t)/release/$(BIN_NAME))"
+
+## Check whether the Intel macOS cross-compilation target is installed
+check-osx-x86:
+	@rustup target list --installed | grep -q '^$(OSX_X86_TARGET)$$' || { \
+		echo "rustup target $(OSX_X86_TARGET) not found, please install it first: rustup target add $(OSX_X86_TARGET)"; \
+		exit 1; \
+	}
+
+## Cross-compile the Intel macOS executable only (release)
+osx-x86: check-osx-x86
+	cargo build --release --target $(OSX_X86_TARGET)
+	@echo "Built: target/$(OSX_X86_TARGET)/release/$(BIN_NAME)"
+
 ## Package the Windows executable together with the example config into dist/windows/ for deployment
 dist-windows: windows
 	mkdir -p $(WIN_DIST)
@@ -62,6 +94,21 @@ dist-linux: linux
 	cp target/$(LINUX_TARGET)/release/$(BIN_NAME) $(LINUX_DIST)/
 	cp config.example.toml $(LINUX_DIST)/
 	@echo "Packaged to $(LINUX_DIST)/"
+
+## Combine the Apple Silicon and Intel builds into a universal binary, packaged with the example
+## config into dist/osx/ for deployment
+dist-osx: osx
+	mkdir -p $(OSX_DIST)
+	lipo -create -output $(OSX_DIST)/$(BIN_NAME) $(foreach t,$(OSX_TARGETS),target/$(t)/release/$(BIN_NAME))
+	cp config.example.toml $(OSX_DIST)/
+	@echo "Packaged universal binary to $(OSX_DIST)/"
+
+## Package the Intel macOS executable together with the example config into dist/osx/ for deployment
+dist-osx-x86: osx-x86
+	mkdir -p $(OSX_DIST)
+	cp target/$(OSX_X86_TARGET)/release/$(BIN_NAME) $(OSX_DIST)/
+	cp config.example.toml $(OSX_DIST)/
+	@echo "Packaged to $(OSX_DIST)/"
 
 dist: dist-windows
 
