@@ -108,6 +108,59 @@ make dist-osx-arm  # package the Apple-Silicon-only osx-arm build + config.examp
 make dist-osx-x86  # package the Intel-only osx-x86 build + config.example.toml under dist/osx/
 ```
 
+## Install
+
+### Download a prebuilt binary
+
+Grab an archive for your platform from the
+[Releases page](https://github.com/single9/erbridge/releases/latest) (`erbridge-<version>-linux.tar.gz`,
+`-linux-arm64`, `-osx` (universal), `-osx-arm64`, `-osx-x86_64`, or `-windows.zip`), then:
+
+```sh
+tar -xzf erbridge-*-linux.tar.gz         # extracts erbridge + config.example.toml
+sudo install -m 755 erbridge /usr/local/bin/erbridge
+```
+
+Each release also publishes a signed `SHA256SUMS` manifest; verify the archive against it
+before extracting if you want to confirm integrity:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+### Build and install with cargo
+
+Install the `erbridge` binary onto your system's `PATH` via `cargo install`:
+
+```sh
+cargo install --path .
+```
+
+This builds a release binary and copies it to `~/.cargo/bin/erbridge` (make sure that
+directory is on your `PATH`; `cargo install` prints a warning if it isn't). Run
+`cargo install --path . --force` to reinstall after pulling new changes.
+
+### Run as a systemd service (Linux)
+
+A template unit is provided at
+[`packaging/systemd/erbridge.service`](packaging/systemd/erbridge.service). It runs
+erbridge `--headless` (JSON logs instead of the TUI) against `/etc/erbridge/config.toml`;
+edit its `ExecStart` line to pick the subcommand (`forward`/`client`/`serve`/`connect`) and
+adjust paths, then install the binary to `/usr/local/bin` (the service runs as a dedicated
+`erbridge` system user with no home directory, so it can't resolve `~/.cargo/bin` --
+use a downloaded release archive, or `cargo build --release` and install the resulting
+`target/release/erbridge`):
+
+```sh
+sudo install -m 755 erbridge /usr/local/bin/erbridge
+sudo useradd --system --no-create-home erbridge   # skip if the user already exists
+sudo mkdir -p /etc/erbridge
+sudo cp config.example.toml /etc/erbridge/config.toml   # then edit it
+sudo cp packaging/systemd/erbridge.service /etc/systemd/system/erbridge.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now erbridge
+```
+
 ## Releases
 
 Prebuilt binaries for Windows (x86_64), Linux (x86_64 and arm64), and macOS (universal, plus

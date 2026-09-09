@@ -1,0 +1,36 @@
+# Example systemd unit for running erbridge headless as a background service.
+#
+# Install:
+#   # This service runs as a dedicated `erbridge` system user with no home directory,
+#   # so it can't resolve `~/.cargo/bin` -- install the binary from a downloaded release
+#   # archive, or from `cargo build --release`, to a fixed system path instead:
+#   sudo install -m 755 erbridge /usr/local/bin/erbridge   # or target/release/erbridge
+#   sudo useradd --system --no-create-home erbridge        # skip if the user already exists
+#   sudo mkdir -p /etc/erbridge && sudo cp config.example.toml /etc/erbridge/config.toml
+#   sudo cp packaging/systemd/erbridge.service /etc/systemd/system/erbridge.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now erbridge
+#
+# Edit the ExecStart subcommand (forward/client/serve/connect) and /etc/erbridge/config.toml
+# to match your setup; see config.example.toml and the README Install / Quick start sections.
+
+[Unit]
+Description=erbridge port forwarder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/erbridge --headless --log-file /var/log/erbridge/erbridge.log --config /etc/erbridge/config.toml forward
+Restart=on-failure
+RestartSec=2
+User=erbridge
+Group=erbridge
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+LogsDirectory=erbridge
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
