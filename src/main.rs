@@ -84,11 +84,12 @@ fn resolve_forward(
     for raw in cli_maps {
         rules.push(config::parse_map_flag(raw)?);
     }
-    // `--token` applies to every `+tls`-secured mapping from this invocation
-    // that doesn't already carry its own token from the config file.
+    // `--token` applies to every mapping with a `transport` from this
+    // invocation that doesn't already carry its own token from the config
+    // file.
     if let Some(token) = cli_token {
         for rule in &mut rules {
-            if rule.secure && rule.token.is_none() {
+            if rule.transport.is_some() && rule.token.is_none() {
                 rule.token = Some(token.clone());
             }
         }

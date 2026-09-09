@@ -4,8 +4,8 @@ Low-latency TCP/UDP port forwarder with a built-in reverse-connection (NAT trave
 
 ## Four modes
 
-- **forward**: Direct forwarding, `external port -> internal target host:port`, supports TCP/UDP simultaneously, multiple mappings can be configured at once. A per-mapping `secure`/`/tls` option can wrap the external (listen-side) TCP leg in TLS, optionally with a `token` (same scheme as `serve`/`connect`) so only an authenticated peer can connect.
-- **client**: Companion to a `secure` forward mapping. Listens locally in plaintext and, for every connection, dials that mapping over TLS (presenting its `token` if one is set), so a plain local client doesn't need its own TLS support to reach it.
+- **forward**: Direct forwarding, `external port -> internal target host:port`, supports TCP/UDP simultaneously, multiple mappings can be configured at once. A per-mapping `transport` option can wrap the external (listen-side) TCP leg in TLS or Noise, optionally with a `token` so only an authenticated peer can connect.
+- **client**: Companion to a `transport`-secured forward mapping. Listens locally in plaintext and, for every connection, dials that mapping using the same transport (presenting its `token` if one is set), so a plain local client doesn't need its own TLS/Noise support to reach it.
 - **serve** (reverse mode, role A): Listens and waits for `connect` (B) to connect in; traffic received on the externally exposed port is then multiplexed and forwarded to B over that A↔B connection.
 - **connect** (reverse mode, role B): Actively connects to `serve` (A); every time A receives a new external connection, it opens a new multiplexed stream over the same connection, and B decides which local (or B-reachable internal) target to forward to based on the tunnel name carried by the stream.
 
@@ -22,7 +22,7 @@ Suitable scenario: A sits in front of the public network/firewall while B (the i
  +------------+              +-------------------------+              +------------+
 ```
 
-With `secure`/`/tls` set on a mapping, the listen-side leg is TLS-wrapped (self-signed
+With `transport = "tls"` set on a mapping, the listen-side leg is TLS-wrapped (self-signed
 cert, generated at startup); the erbridge-to-target leg is unchanged and stays plaintext:
 
 ```
@@ -30,7 +30,7 @@ cert, generated at startup); the erbridge-to-target leg is unchanged and stays p
  +------------+              +-------------------------+              +------------+
  |            | ===TLS=====> | listen 0.0.0.0:8443     | -----------> |            |
  |   client   | <===TLS===== |   -> 10.0.0.5:80        | <----------- |   target   |
- |            |              | (secure = true)         |              |            |
+ |            |              | (transport = "tls")     |              |            |
  +------------+              +-------------------------+              +------------+
 ```
 
@@ -40,27 +40,35 @@ handshake. Use `client` mode as that connecting peer instead, so your own app ke
 talking plaintext to a local port:
 
 ```
- your app        erbridge client                erbridge forward (on A)             internal target
- +--------+   +------------------------+   +---------------------------+            +------------+
- |        |-->| listen 127.0.0.1:1080  |==>| listen 0.0.0.0:8443       |----------->|            |
- | client |<--|   -> A_IP:8443         |<==|   -> 10.0.0.5:80          |<-----------|   target   |
- |        |   | (--token change-me)    |   | (secure=true, token=...) |            |            |
- +--------+   +------------------------+   +---------------------------+            +------------+
+ your app        erbridge client                erbridge forward (on A)                internal target
+ +--------+   +------------------------+   +------------------------------+            +------------+
+ |        |-->| listen 127.0.0.1:1080  |==>| listen 0.0.0.0:8443          |----------->|            |
+ | client |<--|   -> A_IP:8443         |<==|   -> 10.0.0.5:80             |<-----------|   target   |
+ |        |   | (--token change-me)    |   | (transport=tls, token=...)   |            |            |
+ +--------+   +------------------------+   +------------------------------+            +------------+
                           TLS + token handshake
 ```
 
+`transport = "noise"` is the same shape, but there's no generic client for it the way
+`curl -k` speaks TLS — it only ever interoperates with erbridge's own `client` mode, and
+`token` is mandatory (it's hashed into the Noise handshake's pre-shared key, not checked
+as a separate step afterward). Use it when both ends are always erbridge, for a faster
+handshake and authentication that's cryptographically bound to the session rather than
+exchanged in a plaintext frame after the fact.
+
 ### serve / connect connection diagram
 
-Stage 1: B actively connects to A, establishing an encrypted, token-authenticated control channel.
+Stage 1: B actively connects to A, establishing a Noise-encrypted control channel whose
+handshake is itself authenticated by the shared token (see Security notes below).
 
 ```
  A (serve)                                     B (connect)
  +--------------------------+                  +--------------------------+
  | listen 0.0.0.0:9000      |                  | dial A:9000              |
- | (control channel)        |<================ | authenticate with token  |
- | waits for B to dial in   |                  | retry w/ backoff on drop |
+ | (control channel)        |<================ | token is the handshake's |
+ | waits for B to dial in   |                  | PSK; retry w/ backoff    |
  +--------------------------+                  +--------------------------+
-                              TLS + token handshake
+                              Noise_NNpsk0 handshake
 ```
 
 Stage 2: Once the control channel is established, every external connection received on A's
@@ -138,13 +146,12 @@ erbridge forward --map "8080->10.0.0.5:80" --map "5353->10.0.0.5:53/udp"
 
 # Secure forward: wraps the listen-side TCP connection in TLS, so
 # external client -> erbridge is encrypted; erbridge -> target stays plaintext.
-# `/tls` is shorthand for `/tcp+tls` (secure only supports tcp, not udp/both).
+# `/tls` is shorthand for `/tcp+tls` (a transport only supports tcp, not udp/both).
 erbridge forward --map "8443->10.0.0.5:80/tls"
 ```
 
-The cert is a fresh self-signed one generated on every start (same trust model as
-`serve`/`connect` — see Security notes below), so a client connecting to it must
-skip certificate verification:
+The cert is a fresh self-signed one generated on every start (see Security notes below),
+so a client connecting to it must skip certificate verification:
 
 ```sh
 curl -k https://<erbridge_host>:8443/...
@@ -156,11 +163,20 @@ openssl s_client -connect <erbridge_host>:8443
 erbridge --config config.toml forward
 ```
 
-### client: reach a secure forward mapping without your own TLS support
+If both ends are always erbridge (no generic TLS client needs to reach this mapping
+directly), `/noise` wraps it in the Noise protocol instead — faster handshake, and a
+mandatory token that's cryptographically bound into it rather than checked afterward:
 
-Add `--token` on the secure mapping to also require authentication (same length-prefixed,
-constant-time-compared token as `serve`/`connect`) — after that, only `client` mode (or
-something implementing the same handshake) can connect, not a bare TLS client:
+```sh
+erbridge forward --map "8444->10.0.0.5:80/noise" --token change-me
+```
+
+### client: reach a secured forward mapping without your own TLS/Noise support
+
+Add `--token` on the secure mapping to also require authentication (mandatory under
+`/noise`; under `/tls`, optional and checked in a length-prefixed frame right after the
+handshake) — after that, only `client` mode (or something implementing the same
+handshake) can connect, not a bare TLS client:
 
 ```sh
 # on A (the secure forward mapping, now token-gated):
@@ -172,7 +188,14 @@ erbridge forward --map "8443->10.0.0.5:80/tls" --token change-me
 erbridge client --map "1080->A_IP:8443" --token change-me
 ```
 
-Your app then just talks plaintext to `127.0.0.1:1080`; `client` handles the TLS
+`client`'s `--map` also takes a `/tls`/`/noise` modifier naming the far side's transport,
+defaulting to `/tls`:
+
+```sh
+erbridge client --map "1081->A_IP:8444/noise" --token change-me
+```
+
+Your app then just talks plaintext to the local port; `client` handles the transport's
 handshake and token exchange to A on its behalf. Repeat `--map` for multiple mappings;
 see the `[[client]]` section in `config.example.toml` for the config-file form.
 
@@ -206,11 +229,41 @@ erbridge --headless --log-file /var/log/erbridge.log serve --config config.toml
 
 ## Security notes
 
-The A↔B connection in reverse mode is encrypted with an auto-generated self-signed TLS certificate; authentication relies on a shared token compared after the connection is established, not on a certificate chain — this design avoids requiring users to manage certificates. This means TLS here only provides confidentiality/integrity and does **not** verify peer identity; if the network between A and B is itself untrusted (no VPN or other trusted underlying channel), a man-in-the-middle that can intercept traffic can also obtain the token. This is fine to use over an internal network or an existing VPN; if you need to cross an untrusted network, it is recommended to add an additional trusted channel on top.
+The A↔B connection in reverse mode is encrypted and authenticated with the Noise protocol
+(`Noise_NNpsk0`): the shared `token` is hashed into a 32-byte pre-shared key mixed into the
+handshake itself, rather than checked afterward. A mismatched token fails the handshake's
+AEAD tag verification (typically on B's very first message), so the connection just closes
+the same as it would on any other handshake or network failure — there's no dedicated
+"token rejected" reply frame for a remote peer to use as an oracle. This only ever
+interoperates with another erbridge instance; if you need this control channel to cross a
+network you don't otherwise trust, it is still recommended to add an additional trusted
+channel (VPN, etc.) on top, the same as for any point-to-point secret.
 
-`forward`'s optional `secure`/`/tls` mode uses the same self-signed, unauthenticated-identity TLS: it stops passive eavesdropping on the external-client-to-erbridge leg but does not prove erbridge's identity to the client, so a client connecting to it should expect (and typically must configure itself to accept) a certificate it cannot otherwise verify. It only covers that one leg — TCP only, since TLS has no UDP equivalent here — the erbridge-to-target leg remains plaintext.
+`forward`'s `transport = "noise"` mappings use the same Noise handshake and PSK derivation,
+and likewise require a `token` — there's no anonymous form, since nothing but erbridge's own
+`client` mode can speak the protocol anyway.
 
-Adding a `token` to a secure mapping layers on the same post-handshake, constant-time-compared token check `serve`/`connect` uses — it restricts *who* can connect (only a peer that knows the token and speaks the same length-prefixed frame, i.e. `client` mode), but doesn't change what the TLS layer itself does or doesn't prove; the same caveats above still apply.
+`forward`'s `transport = "tls"` mode instead uses a fresh self-signed, unauthenticated-identity
+TLS certificate generated at startup: it stops passive eavesdropping on the
+external-client-to-erbridge leg but does not prove erbridge's identity to the client, so a
+client connecting to it should expect (and typically must configure itself to accept) a
+certificate it cannot otherwise verify. This tradeoff exists specifically so a generic TLS
+client (`curl -k`, `openssl s_client`) can connect directly, which Noise has no equivalent
+for. It only covers that one leg — TCP only, neither transport has a UDP equivalent here —
+the erbridge-to-target leg remains plaintext either way. Adding a `token` to a `tls` mapping
+layers on a post-handshake, constant-time-compared token check exchanged in a plaintext
+frame: it restricts *who* can connect (only a peer that knows the token and speaks that
+frame, i.e. `client` mode), but doesn't change what the TLS layer itself does or doesn't
+prove — the identity caveat above still applies.
+
+Noise depends on the `snow` crate built with its `ring-accelerated` feature (see
+`Cargo.toml`), which runs the ChaCha20-Poly1305 and X25519 operations through `ring` instead
+of `snow`'s pure-Rust default resolver (BLAKE2s, which `ring` doesn't implement, still falls
+back to the default resolver). This isn't just a speed preference: without it, the Noise
+transport measured ~14% slower steady-state latency than the TLS transport it replaces;
+with it, the two are indistinguishable. See
+[`docs/benchmarks/tls-vs-noise-reverse-tunnel-latency.md`](docs/benchmarks/tls-vs-noise-reverse-tunnel-latency.md)
+before changing that feature or the `snow` dependency.
 
 ## Config file
 
@@ -220,8 +273,8 @@ See [`config.example.toml`](config.example.toml) for a complete example. The sec
 
 ```sh
 make test    # equivalent to cargo test: covers forward's TCP/UDP forwarding, UDP idle timeout,
-             # secure/token-gated forward mappings, client mode against them, and serve/connect's
-             # multiplexed forwarding and token authentication
+             # TLS- and Noise-secured forward mappings, client mode against both, the Noise
+             # transport itself, and serve/connect's multiplexed forwarding and PSK authentication
 ```
 
 ## Latency benchmark
@@ -236,7 +289,7 @@ data paths, all on loopback:
 
 - `baseline_direct_tcp_roundtrip` — client <-> echo server, no erbridge
 - `forward_tcp_roundtrip` — client <-> `forward` <-> echo server
-- `reverse_tunnel_tcp_roundtrip` — client <-> `serve` (A) <=yamux/TLS=> `connect` (B) <-> echo server
+- `reverse_tunnel_tcp_roundtrip` — client <-> `serve` (A) <=yamux/Noise=> `connect` (B) <-> echo server
 
 Criterion prints p-value-style `[low mid high]` estimates per run and writes
 an HTML report with full distributions to `target/criterion/report/index.html`.

@@ -13,7 +13,8 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
 
-use crate::config::{ForwardRule, ProtocolKind};
+use crate::config::{ForwardRule, ProtocolKind, Transport};
+use crate::noise;
 use crate::proxy::pipe_bidirectional_tracked;
 use crate::reverse::{MAX_TOKEN_LEN, constant_time_eq, read_frame};
 use crate::stats::{ConnectionInfo, Protocol, Registry};
@@ -27,6 +28,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncStream for T {}
 pub async fn run_forward(rules: Vec<ForwardRule>, registry: Registry) -> Result<()> {
     if rules.is_empty() {
         anyhow::bail!("forward mode needs at least one mapping (config `[[forward]]` or --map)");
+    }
+    for rule in &rules {
+        rule.validate()?;
     }
 
     let mut handles = Vec::new();
@@ -63,23 +67,45 @@ pub async fn run_forward(rules: Vec<ForwardRule>, registry: Registry) -> Result<
     Ok(())
 }
 
+/// Per-rule state needed to secure an accepted client connection, built once
+/// at listener startup rather than per-connection.
+#[derive(Clone)]
+enum ConnSecurity {
+    Plain,
+    Tls(TlsAcceptor),
+    Noise([u8; 32]),
+}
+
 async fn run_tcp_forward(rule: ForwardRule, registry: Registry) -> Result<()> {
     let listener = TcpListener::bind(&rule.listen)
         .await
         .with_context(|| format!("binding TCP listener on {}", rule.listen))?;
 
-    let acceptor = if rule.secure {
-        tls::install_crypto_provider();
-        let cert = tls::generate_self_signed()?;
-        Some(TlsAcceptor::from(tls::server_tls_config(&cert)?))
-    } else {
-        None
+    let security = match rule.transport {
+        None => ConnSecurity::Plain,
+        Some(Transport::Tls) => {
+            tls::install_crypto_provider();
+            let cert = tls::generate_self_signed()?;
+            ConnSecurity::Tls(TlsAcceptor::from(tls::server_tls_config(&cert)?))
+        }
+        Some(Transport::Noise) => {
+            // Validated at startup: `transport = "noise"` requires a token.
+            let token = rule
+                .token
+                .as_ref()
+                .expect("noise transport requires a token");
+            ConnSecurity::Noise(noise::derive_psk(token))
+        }
     };
 
     registry.info(format!(
         "forward[{}] tcp{} listening on {} -> {}",
         rule.label(),
-        if rule.secure { " (tls)" } else { "" },
+        match rule.transport {
+            None => "",
+            Some(Transport::Tls) => " (tls)",
+            Some(Transport::Noise) => " (noise)",
+        },
         rule.listen,
         rule.target
     ));
@@ -88,9 +114,9 @@ async fn run_tcp_forward(rule: ForwardRule, registry: Registry) -> Result<()> {
         let (client, peer) = listener.accept().await?;
         let rule = rule.clone();
         let registry = registry.clone();
-        let acceptor = acceptor.clone();
+        let security = security.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_tcp_conn(client, peer, &rule, &registry, acceptor).await {
+            if let Err(e) = handle_tcp_conn(client, peer, &rule, &registry, security).await {
                 registry.error(format!("forward[{}] tcp {peer}: {e:#}", rule.label()));
             }
         });
@@ -102,12 +128,13 @@ async fn handle_tcp_conn(
     peer: SocketAddr,
     rule: &ForwardRule,
     registry: &Registry,
-    acceptor: Option<TlsAcceptor>,
+    security: ConnSecurity,
 ) -> Result<()> {
     let _ = client.set_nodelay(true);
 
-    let client: Box<dyn AsyncStream> = match acceptor {
-        Some(acceptor) => {
+    let client: Box<dyn AsyncStream> = match security {
+        ConnSecurity::Plain => Box::new(client),
+        ConnSecurity::Tls(acceptor) => {
             let mut tls_stream = acceptor
                 .accept(client)
                 .await
@@ -124,7 +151,12 @@ async fn handle_tcp_conn(
             }
             Box::new(tls_stream)
         }
-        None => Box::new(client),
+        ConnSecurity::Noise(psk) => {
+            let noise_stream = noise::accept(client, &psk)
+                .await
+                .context("Noise handshake with client failed")?;
+            Box::new(noise_stream)
+        }
     };
 
     let target = TcpStream::connect(&rule.target)

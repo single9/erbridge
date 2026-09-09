@@ -22,7 +22,7 @@ async fn forwards_udp_traffic_to_target() {
         target: format!("127.0.0.1:{target_port}"),
         protocol: ProtocolKind::Udp,
         udp_idle_secs: 5,
-        secure: false,
+        transport: None,
         token: None,
     };
     let registry = Registry::new();
@@ -57,7 +57,7 @@ async fn evicts_idle_udp_sessions() {
         target: format!("127.0.0.1:{target_port}"),
         protocol: ProtocolKind::Udp,
         udp_idle_secs: 1,
-        secure: false,
+        transport: None,
         token: None,
     };
     let registry = Registry::new();

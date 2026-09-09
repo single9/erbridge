@@ -1,14 +1,17 @@
-//! TLS for the reverse-tunnel control channel (A <-> B).
+//! TLS transport for `forward`/`client` mappings configured with
+//! `transport = "tls"` (see [`crate::config::Transport::Tls`]).
 //!
 //! The link is encrypted with an ephemeral self-signed certificate generated
 //! fresh on every run. There is no certificate authority and the client does
-//! not verify the server's certificate chain: identity is instead proven by
-//! the shared token exchanged right after the handshake (see `reverse::mod`).
-//! This defeats passive eavesdropping but, unlike a properly pinned or
-//! CA-signed setup, does not by itself stop an on-path attacker who can also
-//! intercept the token. That tradeoff was chosen deliberately to avoid
-//! certificate management for an internal tool; revisit if the link ever
-//! crosses an untrusted network without an existing VPN/tunnel underneath.
+//! not verify the server's certificate chain: identity is instead proven, if
+//! the mapping sets a token, by exchanging it right after the handshake (see
+//! `reverse::mod`). This defeats passive eavesdropping but, unlike a properly
+//! pinned or CA-signed setup, does not by itself stop an on-path attacker who
+//! can also intercept the token. This tradeoff exists specifically to stay
+//! interoperable with any generic TLS client (`curl -k`, `openssl s_client`,
+//! ...); mappings and the reverse-tunnel control channel that don't need
+//! that interoperability use `transport = "noise"` (see [`crate::noise`])
+//! instead, where the token is cryptographically bound into the handshake.
 
 use std::sync::Arc;
 

@@ -21,7 +21,7 @@ async fn forwards_tcp_traffic_to_target() {
         target: format!("127.0.0.1:{target_port}"),
         protocol: ProtocolKind::Tcp,
         udp_idle_secs: 60,
-        secure: false,
+        transport: None,
         token: None,
     };
     let registry = Registry::new();
@@ -52,7 +52,7 @@ async fn forwards_tls_tcp_traffic_to_plaintext_target() {
         target: format!("127.0.0.1:{target_port}"),
         protocol: ProtocolKind::Tcp,
         udp_idle_secs: 60,
-        secure: true,
+        transport: Some(erbridge::config::Transport::Tls),
         token: None,
     };
     let registry = Registry::new();
@@ -82,7 +82,7 @@ async fn forwards_multiple_concurrent_tcp_connections() {
         target: format!("127.0.0.1:{target_port}"),
         protocol: ProtocolKind::Tcp,
         udp_idle_secs: 60,
-        secure: false,
+        transport: None,
         token: None,
     };
     let registry = Registry::new();

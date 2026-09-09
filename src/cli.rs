@@ -31,28 +31,30 @@ pub enum Command {
     /// Direct forwarding: external listen port(s) -> internal target(s).
     Forward {
         /// Ad-hoc mapping, repeatable: LISTEN->TARGET[/tcp|udp|both], where
-        /// proto can add a `+tls` modifier (or bare `tls` for `tcp+tls`) to
-        /// wrap that mapping's listen side in TLS.
-        /// LISTEN may be a bare port (binds 0.0.0.0) or host:port.
+        /// proto can add a `+tls` or `+noise` modifier (or bare `tls`/`noise`
+        /// for `tcp+tls`/`tcp+noise`) to wrap that mapping's listen side in
+        /// that transport. LISTEN may be a bare port (binds 0.0.0.0) or
+        /// host:port.
         #[arg(long = "map", value_name = "LISTEN->TARGET[/proto]")]
         maps: Vec<String>,
-        /// Required token for every `+tls`-secured mapping above (applies to
-        /// all of them); only erbridge's own `client` mode (or the same
-        /// handshake) can then connect. Omit to let any TLS client connect,
-        /// same as today.
+        /// Token for every `+tls`/`+noise` mapping above that doesn't set its
+        /// own (applies to all of them). Mandatory for `+noise`; for `+tls`,
+        /// omitting it lets any TLS client connect, same as today.
         #[arg(long)]
         token: Option<String>,
     },
 
-    /// Companion to a `forward` mapping secured with `+tls` (optionally
-    /// `--token`): listens locally in plaintext, and for every connection
-    /// dials the secured mapping over TLS, presents the token if configured,
-    /// then relays bytes -- so a plain local client doesn't need its own TLS
-    /// support to reach a `secure` forward mapping.
+    /// Companion to a `forward` mapping secured with `+tls`/`+noise`
+    /// (optionally `--token`): listens locally in plaintext, and for every
+    /// connection dials the secured mapping using that same transport,
+    /// presents the token if configured, then relays bytes -- so a plain
+    /// local client doesn't need its own TLS/Noise support to reach it.
     Client {
-        /// Ad-hoc mapping, repeatable: LOCAL_LISTEN->SERVER_ADDR.
-        /// LOCAL_LISTEN may be a bare port (binds 127.0.0.1) or host:port.
-        #[arg(long = "map", value_name = "LOCAL_LISTEN->SERVER_ADDR")]
+        /// Ad-hoc mapping, repeatable: LOCAL_LISTEN->SERVER_ADDR[/tls|/noise].
+        /// LOCAL_LISTEN may be a bare port (binds 127.0.0.1) or host:port;
+        /// the modifier names the far side mapping's transport and defaults
+        /// to `tls` when omitted.
+        #[arg(long = "map", value_name = "LOCAL_LISTEN->SERVER_ADDR[/proto]")]
         maps: Vec<String>,
         /// Token to present to the secured mapping (applies to all of them
         /// above); must match its `--token`/`token`.

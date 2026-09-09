@@ -24,7 +24,28 @@ fn default_reconnect_max_secs() -> u64 {
     30
 }
 
+/// How a mapping's listen-side TCP leg is secured. Replaces the old
+/// `secure: bool` field: a config using `secure`/`token` in this shape fails
+/// to load with a message pointing here, rather than silently keeping the
+/// previous behavior (see README's Security notes).
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    /// A fresh self-signed cert generated at startup: confidentiality
+    /// against passive eavesdropping, no peer-identity verification (see
+    /// `tls` module docs). Interoperable with any TLS client (`curl -k`,
+    /// `openssl s_client`, ...); `token` is optional here and, if set, is
+    /// exchanged as a plaintext frame right after the handshake.
+    #[default]
+    Tls,
+    /// The Noise protocol (see `noise` module docs), with `token` mandatory
+    /// and hashed into a pre-shared key mixed into the handshake itself.
+    /// Only interoperable with another erbridge instance.
+    Noise,
+}
+
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ForwardRule {
     pub name: Option<String>,
     pub listen: String,
@@ -33,21 +54,14 @@ pub struct ForwardRule {
     pub protocol: ProtocolKind,
     #[serde(default = "default_udp_idle_secs")]
     pub udp_idle_secs: u64,
-    /// Wraps the external (listen-side) TCP connection in TLS using a fresh
-    /// self-signed cert generated at startup, same trust model as the
-    /// serve/connect control channel (see `tls` module docs): confidentiality
-    /// against passive eavesdropping, no peer-identity verification. Only
-    /// applies to the TCP leg; UDP forwarding is unaffected. The leg from
-    /// erbridge to `target` remains plaintext.
+    /// Wraps the external (listen-side) TCP connection per [`Transport`].
+    /// `None` leaves it plaintext. Only applies to the TCP leg; UDP
+    /// forwarding is unaffected. The leg from erbridge to `target` remains
+    /// plaintext either way.
     #[serde(default)]
-    pub secure: bool,
-    /// Only meaningful when `secure` is set. If present, the client must
-    /// present this token (in the same length-prefixed frame + constant-time
-    /// compare scheme as `serve`/`connect`) right after the TLS handshake, or
-    /// the connection is closed before anything is forwarded. Leaving it
-    /// unset keeps `secure`'s original behavior: any TLS client (`curl -k`,
-    /// `openssl s_client`, ...) can connect. Setting it means only erbridge's
-    /// own `client` mode (or something implementing the same handshake) can.
+    pub transport: Option<Transport>,
+    /// Meaning depends on `transport`: see [`Transport::Tls`] and
+    /// [`Transport::Noise`]. Required when `transport = "noise"`.
     #[serde(default)]
     pub token: Option<String>,
 }
@@ -57,6 +71,18 @@ impl ForwardRule {
         self.name
             .clone()
             .unwrap_or_else(|| format!("{}->{}", self.listen, self.target))
+    }
+
+    /// `transport = "noise"` has no anonymous form (see [`Transport::Noise`]),
+    /// so a token is mandatory there; `tls` and plaintext leave it optional.
+    pub fn validate(&self) -> Result<()> {
+        if self.transport == Some(Transport::Noise) && self.token.is_none() {
+            bail!(
+                "forward[{}]: transport = \"noise\" requires a token",
+                self.label()
+            );
+        }
+        Ok(())
     }
 }
 
@@ -95,13 +121,19 @@ pub struct ConnectConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientRule {
     pub name: Option<String>,
     /// Local plaintext address this side listens on.
     pub listen: String,
-    /// Address of a `forward` mapping with `secure = true` on the far side.
+    /// Address of a `forward` mapping with a `transport` set on the far side.
     pub server: String,
-    /// Must match that mapping's `token`, if it set one.
+    /// Which transport the far side's mapping uses. Defaults to `tls` to
+    /// match the transport a bare `secure = true` mapping used before
+    /// `transport` existed.
+    #[serde(default)]
+    pub transport: Transport,
+    /// Must match that mapping's `token`. Required when `transport = "noise"`.
     #[serde(default)]
     pub token: Option<String>,
 }
@@ -111,6 +143,16 @@ impl ClientRule {
         self.name
             .clone()
             .unwrap_or_else(|| format!("{}->{}", self.listen, self.server))
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.transport == Transport::Noise && self.token.is_none() {
+            bail!(
+                "client[{}]: transport = \"noise\" requires a token",
+                self.label()
+            );
+        }
+        Ok(())
     }
 }
 
@@ -136,12 +178,13 @@ impl FileConfig {
 
 /// Parses a `--map LISTEN:TARGET_HOST:TARGET_PORT[/proto]` CLI shorthand into a
 /// `ForwardRule`. `LISTEN` may be `PORT` or `HOST:PORT`. `proto` may add a
-/// `+tls` modifier (e.g. `tcp+tls`, or bare `tls` as shorthand for `tcp+tls`)
-/// to wrap the listen-side TCP connection in TLS; see `ForwardRule::secure`.
+/// `+tls` or `+noise` modifier (e.g. `tcp+tls`, or bare `tls`/`noise` as
+/// shorthand for `tcp+tls`/`tcp+noise`) to wrap the listen-side TCP
+/// connection per [`Transport`].
 pub fn parse_map_flag(raw: &str) -> Result<ForwardRule> {
-    let (rest, (protocol, secure)) = match raw.rsplit_once('/') {
+    let (rest, (protocol, transport)) = match raw.rsplit_once('/') {
         Some((rest, proto)) => (rest, parse_protocol(proto)?),
-        None => (raw, (ProtocolKind::Both, false)),
+        None => (raw, (ProtocolKind::Both, None)),
     };
     let parts: Vec<&str> = rest.splitn(2, "->").map(str::trim).collect();
     let (listen_raw, target_raw) = match parts.as_slice() {
@@ -155,27 +198,43 @@ pub fn parse_map_flag(raw: &str) -> Result<ForwardRule> {
         target: target_raw.to_string(),
         protocol,
         udp_idle_secs: default_udp_idle_secs(),
-        secure,
+        transport,
         token: None,
     })
 }
 
-/// Parses a `--map LOCAL_LISTEN->SERVER_ADDR` CLI shorthand for `client` mode
-/// into a `ClientRule`. `LOCAL_LISTEN` may be a bare port (binds 127.0.0.1) or
-/// host:port; `SERVER_ADDR` must be `host:port`.
+/// Parses a `--map LOCAL_LISTEN->SERVER_ADDR[/tls|/noise]` CLI shorthand for
+/// `client` mode into a `ClientRule`. `LOCAL_LISTEN` may be a bare port
+/// (binds 127.0.0.1) or host:port; `SERVER_ADDR` must be `host:port`. The
+/// modifier names the far side mapping's transport; omitting it defaults to
+/// `tls`, matching the transport `client` always spoke before `transport`
+/// existed.
 pub fn parse_client_map_flag(raw: &str) -> Result<ClientRule> {
-    let parts: Vec<&str> = raw.splitn(2, "->").map(str::trim).collect();
+    let (rest, transport) = match raw.rsplit_once('/') {
+        Some((rest, modifier)) => (rest, parse_client_transport(modifier)?),
+        None => (raw, Transport::Tls),
+    };
+    let parts: Vec<&str> = rest.splitn(2, "->").map(str::trim).collect();
     let (listen_raw, server_raw) = match parts.as_slice() {
         [listen, server] => (*listen, *server),
-        _ => bail!("--map must look like LOCAL_LISTEN->SERVER_ADDR, got: {raw}"),
+        _ => bail!("--map must look like LOCAL_LISTEN->SERVER_ADDR[/proto], got: {raw}"),
     };
     let listen = normalize_client_listen(listen_raw)?;
     Ok(ClientRule {
         name: None,
         listen,
         server: server_raw.to_string(),
+        transport,
         token: None,
     })
+}
+
+fn parse_client_transport(modifier: &str) -> Result<Transport> {
+    match modifier.to_ascii_lowercase().as_str() {
+        "tls" => Ok(Transport::Tls),
+        "noise" => Ok(Transport::Noise),
+        other => bail!("unknown transport '{other}', expected tls or noise"),
+    }
 }
 
 /// Accepts a bare port ("1080") as shorthand for "127.0.0.1:1080" -- unlike
@@ -188,25 +247,32 @@ fn normalize_client_listen(raw: &str) -> Result<String> {
     }
 }
 
-fn parse_protocol(s: &str) -> Result<(ProtocolKind, bool)> {
-    let secure = s
-        .split('+')
-        .any(|part| part.eq_ignore_ascii_case("tls"));
-    let without_tls: Vec<&str> = s
-        .split('+')
-        .filter(|part| !part.eq_ignore_ascii_case("tls"))
-        .collect();
-    let protocol = match without_tls.join("+").to_ascii_lowercase().as_str() {
-        "" if secure => ProtocolKind::Tcp,
+fn parse_protocol(s: &str) -> Result<(ProtocolKind, Option<Transport>)> {
+    let is_transport =
+        |part: &&str| part.eq_ignore_ascii_case("tls") || part.eq_ignore_ascii_case("noise");
+    let transport_parts: Vec<&str> = s.split('+').filter(is_transport).collect();
+    let transport = match transport_parts.as_slice() {
+        [] => None,
+        [t] if t.eq_ignore_ascii_case("tls") => Some(Transport::Tls),
+        [t] if t.eq_ignore_ascii_case("noise") => Some(Transport::Noise),
+        _ => bail!("'{s}' names more than one transport, expected at most one of +tls/+noise"),
+    };
+    let without_transport: Vec<&str> = s.split('+').filter(|p| !is_transport(p)).collect();
+    let protocol = match without_transport.join("+").to_ascii_lowercase().as_str() {
+        "" if transport.is_some() => ProtocolKind::Tcp,
         "tcp" => ProtocolKind::Tcp,
         "udp" => ProtocolKind::Udp,
         "both" | "tcp+udp" | "udp+tcp" => ProtocolKind::Both,
-        other => bail!("unknown protocol '{other}', expected tcp, udp, both, optionally with a +tls modifier"),
+        other => bail!(
+            "unknown protocol '{other}', expected tcp, udp, both, optionally with a +tls/+noise modifier"
+        ),
     };
-    if secure && protocol != ProtocolKind::Tcp {
-        bail!("+tls only supports the tcp protocol, got '{s}' (UDP forwarding cannot be wrapped in TLS)");
+    if transport.is_some() && protocol != ProtocolKind::Tcp {
+        bail!(
+            "+tls/+noise only support the tcp protocol, got '{s}' (UDP forwarding cannot be wrapped in a transport)"
+        );
     }
-    Ok((protocol, secure))
+    Ok((protocol, transport))
 }
 
 /// Accepts a bare port ("8080") as shorthand for "0.0.0.0:8080".
@@ -226,21 +292,33 @@ mod tests {
     fn map_flag_without_proto_is_plaintext_both() {
         let rule = parse_map_flag("8080->10.0.0.5:80").unwrap();
         assert_eq!(rule.protocol, ProtocolKind::Both);
-        assert!(!rule.secure);
+        assert_eq!(rule.transport, None);
     }
 
     #[test]
-    fn map_flag_bare_tls_means_secure_tcp() {
+    fn map_flag_bare_tls_means_tls_tcp() {
         let rule = parse_map_flag("8080->10.0.0.5:80/tls").unwrap();
         assert_eq!(rule.protocol, ProtocolKind::Tcp);
-        assert!(rule.secure);
+        assert_eq!(rule.transport, Some(Transport::Tls));
     }
 
     #[test]
-    fn map_flag_tcp_plus_tls_means_secure_tcp() {
+    fn map_flag_tcp_plus_tls_means_tls_tcp() {
         let rule = parse_map_flag("8080->10.0.0.5:80/tcp+tls").unwrap();
         assert_eq!(rule.protocol, ProtocolKind::Tcp);
-        assert!(rule.secure);
+        assert_eq!(rule.transport, Some(Transport::Tls));
+    }
+
+    #[test]
+    fn map_flag_bare_noise_means_noise_tcp() {
+        let rule = parse_map_flag("8080->10.0.0.5:80/noise").unwrap();
+        assert_eq!(rule.protocol, ProtocolKind::Tcp);
+        assert_eq!(rule.transport, Some(Transport::Noise));
+    }
+
+    #[test]
+    fn map_flag_both_transports_is_rejected() {
+        assert!(parse_map_flag("8080->10.0.0.5:80/tcp+tls+noise").is_err());
     }
 
     #[test]
@@ -251,5 +329,22 @@ mod tests {
     #[test]
     fn map_flag_both_plus_tls_is_rejected() {
         assert!(parse_map_flag("8080->10.0.0.5:80/both+tls").is_err());
+    }
+
+    #[test]
+    fn client_map_flag_without_modifier_defaults_to_tls() {
+        let rule = parse_client_map_flag("1080->10.0.0.5:8443").unwrap();
+        assert_eq!(rule.transport, Transport::Tls);
+    }
+
+    #[test]
+    fn client_map_flag_noise_modifier_selects_noise() {
+        let rule = parse_client_map_flag("1080->10.0.0.5:8443/noise").unwrap();
+        assert_eq!(rule.transport, Transport::Noise);
+    }
+
+    #[test]
+    fn client_map_flag_unknown_modifier_is_rejected() {
+        assert!(parse_client_map_flag("1080->10.0.0.5:8443/quic").is_err());
     }
 }

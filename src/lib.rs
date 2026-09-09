@@ -3,6 +3,7 @@ pub mod client;
 pub mod config;
 pub mod forward;
 pub mod mux;
+pub mod noise;
 pub mod proxy;
 pub mod reverse;
 pub mod stats;

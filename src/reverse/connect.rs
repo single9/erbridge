@@ -2,19 +2,17 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use rustls_pki_types::ServerName;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use yamux::Stream as MuxStream;
 
 use crate::config::ConnectConfig;
 use crate::mux;
+use crate::noise;
 use crate::proxy::pipe_bidirectional_tracked;
-use crate::reverse::{MAX_NAME_LEN, read_frame, write_frame};
+use crate::reverse::{MAX_NAME_LEN, read_frame};
 use crate::stats::{Protocol, Registry};
-use crate::tls;
 
 /// Runs the B role: repeatedly dials `cfg.server`, and for every stream A
 /// opens through the tunnel, dials the locally-configured target named in
@@ -25,9 +23,7 @@ pub async fn run_connect(cfg: ConnectConfig, registry: Registry) -> Result<()> {
         bail!("connect needs at least one [[connect.tunnel]] entry");
     }
 
-    tls::install_crypto_provider();
-    let tls_config = tls::client_tls_config()?;
-    let connector = TlsConnector::from(tls_config);
+    let psk = noise::derive_psk(&cfg.token);
 
     let targets: HashMap<String, String> = cfg
         .tunnel
@@ -40,7 +36,7 @@ pub async fn run_connect(cfg: ConnectConfig, registry: Registry) -> Result<()> {
     let mut backoff = min_backoff;
 
     loop {
-        match run_one_session(&cfg, &connector, &targets, &registry).await {
+        match run_one_session(&cfg, &psk, &targets, &registry).await {
             Ok(()) => {
                 registry.info("connect: session ended, reconnecting".to_string());
                 backoff = min_backoff;
@@ -57,7 +53,7 @@ pub async fn run_connect(cfg: ConnectConfig, registry: Registry) -> Result<()> {
 
 async fn run_one_session(
     cfg: &ConnectConfig,
-    connector: &TlsConnector,
+    psk: &[u8; 32],
     targets: &HashMap<String, String>,
     registry: &Registry,
 ) -> Result<()> {
@@ -66,26 +62,12 @@ async fn run_one_session(
         .with_context(|| format!("connecting to server (A) at {}", cfg.server))?;
     let _ = tcp.set_nodelay(true);
 
-    let server_name = ServerName::try_from("erbridge").expect("static server name is valid");
-    let mut tls_stream = connector
-        .connect(server_name, tcp)
+    let noise_stream = noise::connect(tcp, psk)
         .await
-        .context("TLS handshake with A failed")?;
-
-    write_frame(&mut tls_stream, cfg.token.as_bytes())
-        .await
-        .context("sending token to A")?;
-    let mut ack = [0u8; 1];
-    tls_stream
-        .read_exact(&mut ack)
-        .await
-        .context("reading token acknowledgement from A")?;
-    if ack[0] != 1 {
-        bail!("token rejected by A");
-    }
+        .context("Noise handshake with A failed")?;
     registry.info(format!("connect: connected to {}", cfg.server));
 
-    let (_control, mut inbound_rx) = mux::spawn(tls_stream.compat(), mux::Mode::Server);
+    let (_control, mut inbound_rx) = mux::spawn(noise_stream.compat(), mux::Mode::Server);
     while let Some(stream) = inbound_rx.recv().await {
         let targets = targets.clone();
         let registry = registry.clone();

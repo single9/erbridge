@@ -114,7 +114,7 @@ async fn multiple_streams_share_one_control_connection() {
 }
 
 #[tokio::test]
-async fn rejects_mismatched_token() {
+async fn rejects_mismatched_psk() {
     let control_port = common::free_port();
     let external_port = common::free_port();
 
@@ -145,8 +145,8 @@ async fn rejects_mismatched_token() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let log = serve_registry.recent_log();
     assert!(
-        log.iter().any(|line| line.contains("token mismatch")),
-        "expected a token mismatch log line, got: {log:?}"
+        log.iter().any(|line| line.contains("Noise handshake")),
+        "expected a Noise handshake failure log line, got: {log:?}"
     );
     assert_eq!(serve_registry.totals().total_connections, 0);
 }

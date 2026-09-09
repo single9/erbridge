@@ -5,7 +5,7 @@
 #   forward  direct forwarding: external port -> internal target host:port (TCP/UDP)
 #   serve    reverse mode role A: waits for connect (B) to connect in, then exposes a port externally
 #   connect  reverse mode role B: connects to serve (A), forwards received traffic to a local target
-#   client   companion to a `secure = true` forward mapping: local plaintext listener -> TLS -> that mapping
+#   client   companion to a forward mapping with a `transport`: local plaintext listener -> that transport -> that mapping
 
 # ---- forward: can be repeated for multiple mappings ----
 [[forward]]
@@ -22,23 +22,42 @@ protocol = "udp"
 udp_idle_secs = 60           # how long a UDP pseudo-connection can be idle before it's considered ended (default 60)
 
 [[forward]]
-name = "secure-web"
+name = "tls-web"
 listen = "0.0.0.0:8443"
 target = "10.0.0.5:80"       # this leg (erbridge -> target) stays plaintext
-protocol = "tcp"             # secure only supports tcp, not udp/both
-secure = true                # wraps the listen-side connection in TLS (self-signed, generated at startup;
-                              # same trust model as serve/connect -- see README's Security notes)
+protocol = "tcp"             # a transport only supports tcp, not udp/both
+transport = "tls"            # wraps the listen-side connection in TLS (self-signed, generated at startup;
+                              # see README's Security notes). Interoperable with any TLS client.
 token = "change-me"          # optional: if set, the connecting side must present this token right
-                              # after the TLS handshake (same scheme as serve/connect), so only
-                              # erbridge's own `client` mode (or the same handshake) can connect --
-                              # otherwise any TLS client (curl -k, openssl s_client, ...) works
+                              # after the TLS handshake, so only erbridge's own `client` mode (or the
+                              # same handshake) can connect -- otherwise any TLS client
+                              # (curl -k, openssl s_client, ...) works
 
-# ---- client: companion to a `secure = true` forward mapping above, can be repeated ----
+[[forward]]
+name = "noise-web"
+listen = "0.0.0.0:8444"
+target = "10.0.0.5:80"
+protocol = "tcp"
+transport = "noise"          # wraps the listen-side connection in the Noise protocol (see README's
+                              # Security notes). Only erbridge's own `client` mode can connect -- there
+                              # is no generic Noise client the way curl speaks TLS.
+token = "change-me"          # required under transport = "noise": hashed into the handshake's
+                              # pre-shared key, rather than checked afterward like the tls transport does
+
+# ---- client: companion to a forward mapping with a `transport` above, can be repeated ----
 [[client]]
-name = "secure-web"
+name = "tls-web"
 listen = "127.0.0.1:1080"    # local plaintext address your own client app connects to
 server = "A_IP:8443"         # the secured forward mapping's external address
+transport = "tls"            # must match that mapping's transport (default tls)
 token = "change-me"          # must match that mapping's token, if it set one
+
+[[client]]
+name = "noise-web"
+listen = "127.0.0.1:1081"
+server = "A_IP:8444"
+transport = "noise"
+token = "change-me"          # required under transport = "noise"
 
 # ---- serve: role A, waits for B to connect ----
 [serve]
