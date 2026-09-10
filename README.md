@@ -374,6 +374,12 @@ prebuilt binaries). A missing tool is skipped with a note, not fatal — the
 rest of the comparison still runs. Per-process logs land in a temp dir printed
 at the top of the output.
 
+## Related tools
+
+- [MoonProxy](https://github.com/MoonProxyHQ/moonproxy-desktop) — Cross-platform
+  desktop GUI client for frp (Tauri v2 + Rust) for non-technical users,
+  featuring visual proxy rules, traffic monitoring and system tray
+
 ## License
 
 [MIT](LICENSE)
