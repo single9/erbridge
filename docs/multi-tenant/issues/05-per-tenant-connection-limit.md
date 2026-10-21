@@ -1,6 +1,6 @@
 # 05: Per-tenant connection limit
 
-**Status:** todo · **Crate:** erbridge-core · **Blocked by:** 03
+**Status:** done · **Crate:** erbridge-core · **Blocked by:** 03
 
 **What to build:** `max_conns` enforced per tenant with a semaphore; excess
 connections are closed immediately.
