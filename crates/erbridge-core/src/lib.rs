@@ -54,5 +54,6 @@ pub mod reverse;
 pub mod sni;
 pub mod stats;
 pub mod tenant;
+pub mod tenant_store;
 #[doc(hidden)]
 pub mod tls;

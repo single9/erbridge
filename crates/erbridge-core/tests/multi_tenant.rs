@@ -10,8 +10,10 @@ use erbridge_core::config::{ConnectConfig, ConnectTunnel, ServeConfig};
 use erbridge_core::noise;
 use erbridge_core::reverse::connect::run_connect_with_shutdown;
 use erbridge_core::reverse::serve::run_serve_with_shutdown;
+use erbridge_core::reverse::tenant_serve::{TenantServeConfig, run_tenant_serve_with_store};
 use erbridge_core::stats::Registry;
 use erbridge_core::tenant::{Tenant, TenantSet};
+use erbridge_core::tenant_store::{FileStore, TenantStore};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
@@ -329,4 +331,180 @@ async fn shutdown_ends_sessions_and_frees_both_ports() {
     let control_port: u16 = serve.control.rsplit(':').next().unwrap().parse().unwrap();
     std::net::TcpListener::bind(("127.0.0.1", control_port)).expect("control port still bound");
     std::net::TcpListener::bind(serve.sni).expect("sni port still bound");
+}
+
+/// Like `start_serve`, but through the store-backed entry point with a fast
+/// reload interval, so tests of live changes do not wait a second for each.
+async fn start_serve_fast_reload(tenants: Vec<Tenant>) -> (Serve, FileStore) {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("tenants.toml");
+    let store = FileStore::new(&file);
+    for t in tenants {
+        store.add_tenant(t).unwrap();
+    }
+
+    let control_port = common::free_port();
+    let sni_port = common::free_port();
+    let shutdown = CancellationToken::new();
+    let cfg = TenantServeConfig {
+        listen: format!("127.0.0.1:{control_port}"),
+        sni_listen: format!("127.0.0.1:{sni_port}"),
+        reload_interval: Duration::from_millis(50),
+    };
+    tokio::spawn(run_tenant_serve_with_store(
+        cfg,
+        Arc::new(FileStore::new(&file)),
+        Registry::new(),
+        shutdown.clone(),
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let serve = Serve {
+        control: format!("127.0.0.1:{control_port}"),
+        sni: format!("127.0.0.1:{sni_port}").parse().unwrap(),
+        file,
+        shutdown,
+        _dir: dir,
+    };
+    (serve, store)
+}
+
+async fn wait_until_offline(serve: &Serve, host: &str) {
+    for _ in 0..50 {
+        if hello_and_read(serve, host, 1).await.is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("tenant at {host} never went offline");
+}
+
+#[tokio::test]
+async fn adding_a_tenant_while_serving_needs_no_restart() {
+    let (serve, store) = start_serve_fast_reload(vec![]).await;
+    let (addr, _) = target("N:").await;
+    let _c = spawn_connect(&serve, "token-n", &[("tn", addr)]);
+
+    // Nobody by that name yet: the connect keeps retrying and is refused.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(hello_and_read(&serve, "n.example.com", 1).await.is_empty());
+
+    store
+        .add_tenant(tenant("tn", "token-n", "n.example.com"))
+        .unwrap();
+    wait_until_online(&serve, "n.example.com", "N:").await;
+    serve.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn revoking_one_tenant_leaves_the_others_connections_alone() {
+    let (serve, store) = start_serve_fast_reload(vec![
+        tenant("ta", "token-a", "a.example.com"),
+        tenant("tb", "token-b", "b.example.com"),
+    ])
+    .await;
+    let (addr_a, _) = target("A:").await;
+    let (addr_b, _) = target("B:").await;
+    let _a = spawn_connect(&serve, "token-a", &[("ta", addr_a)]);
+    let _b = spawn_connect(&serve, "token-b", &[("tb", addr_b)]);
+    wait_until_online(&serve, "a.example.com", "A:").await;
+    wait_until_online(&serve, "b.example.com", "B:").await;
+
+    // A connection to B that stays open across the revocation.
+    let mut held = TcpStream::connect(serve.sni).await.unwrap();
+    held.write_all(&common::client_hello("b.example.com"))
+        .await
+        .unwrap();
+    let mut buf = vec![0u8; 4096];
+    assert!(held.read(&mut buf).await.unwrap() > 0);
+
+    store.revoke("ta").unwrap();
+    wait_until_offline(&serve, "a.example.com").await;
+
+    held.write_all(b"still there").await.unwrap();
+    let n = tokio::time::timeout(Duration::from_secs(3), held.read(&mut buf))
+        .await
+        .expect("B's connection stalled")
+        .unwrap();
+    assert!(buf[..n].starts_with(b"B:still there"));
+    assert!(
+        hello_and_read(&serve, "b.example.com", 2)
+            .await
+            .starts_with(b"B:")
+    );
+    serve.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn disabling_ends_the_session_and_enabling_brings_it_back() {
+    let (serve, store) =
+        start_serve_fast_reload(vec![tenant("ta", "token-a", "a.example.com")]).await;
+    let (addr, _) = target("A:").await;
+    let _a = spawn_connect(&serve, "token-a", &[("ta", addr)]);
+    wait_until_online(&serve, "a.example.com", "A:").await;
+
+    store.set_disabled("ta", true).unwrap();
+    wait_until_offline(&serve, "a.example.com").await;
+
+    store.set_disabled("ta", false).unwrap();
+    wait_until_online(&serve, "a.example.com", "A:").await;
+    serve.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn rotating_a_tenants_token_ends_the_old_session() {
+    let (serve, store) =
+        start_serve_fast_reload(vec![tenant("ta", "old-token", "a.example.com")]).await;
+    let (addr, _) = target("A:").await;
+    let _old = spawn_connect(&serve, "old-token", &[("ta", addr)]);
+    wait_until_online(&serve, "a.example.com", "A:").await;
+
+    store
+        .replace_with(&mut |set| {
+            set.without_tenant("ta")?
+                .with_tenant(tenant("ta", "new-token", "a.example.com"))
+        })
+        .unwrap();
+    wait_until_offline(&serve, "a.example.com").await;
+
+    let _new = spawn_connect(&serve, "new-token", &[("ta", addr)]);
+    wait_until_online(&serve, "a.example.com", "A:").await;
+    serve.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_corrupt_file_keeps_the_previous_tenants_until_it_is_fixed() {
+    let (serve, store) =
+        start_serve_fast_reload(vec![tenant("tb", "token-b", "b.example.com")]).await;
+    let (addr_b, _) = target("B:").await;
+    let _b = spawn_connect(&serve, "token-b", &[("tb", addr_b)]);
+    wait_until_online(&serve, "b.example.com", "B:").await;
+
+    std::fs::write(&serve.file, "[[tenant]\nbroken").unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        hello_and_read(&serve, "b.example.com", 2)
+            .await
+            .starts_with(b"B:")
+    );
+
+    // Repairing the file with a new tenant added is picked up.
+    std::fs::write(
+        &serve.file,
+        TenantSet::new(
+            vec![
+                tenant("tb", "token-b", "b.example.com"),
+                tenant("tc", "token-c", "c.example.com"),
+            ],
+            vec![],
+        )
+        .unwrap()
+        .to_toml()
+        .unwrap(),
+    )
+    .unwrap();
+    let (addr_c, _) = target("C:").await;
+    let _c = spawn_connect(&serve, "token-c", &[("tc", addr_c)]);
+    wait_until_online(&serve, "c.example.com", "C:").await;
+    let _ = store;
+    serve.shutdown.cancel();
 }

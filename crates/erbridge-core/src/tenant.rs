@@ -159,6 +159,78 @@ fn check_entry(sni: &str, max_conns: usize, what: &str) -> Result<()> {
     Ok(())
 }
 
+/// Edits. Each returns a new validated set and leaves `self` untouched.
+impl TenantSet {
+    pub fn with_tenant(&self, tenant: Tenant) -> Result<Self> {
+        let mut tenants = self.tenants.clone();
+        tenants.push(tenant);
+        Self::new(tenants, self.codes.clone())
+    }
+
+    pub fn with_code(&self, code: EnrollCode) -> Result<Self> {
+        let mut codes = self.codes.clone();
+        codes.push(code);
+        Self::new(self.tenants.clone(), codes)
+    }
+
+    pub fn without_tenant(&self, name: &str) -> Result<Self> {
+        if self.tenant(name).is_none() {
+            bail!("no tenant named '{name}'");
+        }
+        let tenants = self
+            .tenants
+            .iter()
+            .filter(|t| t.name != name)
+            .cloned()
+            .collect();
+        Self::new(tenants, self.codes.clone())
+    }
+
+    pub fn with_disabled(&self, name: &str, disabled: bool) -> Result<Self> {
+        if self.tenant(name).is_none() {
+            bail!("no tenant named '{name}'");
+        }
+        let mut tenants = self.tenants.clone();
+        for t in tenants.iter_mut().filter(|t| t.name == name) {
+            t.disabled = disabled;
+        }
+        Self::new(tenants, self.codes.clone())
+    }
+
+    /// Burns the code whose PSK is `code_psk` and creates a tenant from it
+    /// under `name` with PSK `psk`. Fails, changing nothing, if there is no such
+    /// code or it has expired at `now_unix`.
+    pub fn redeem(
+        &self,
+        code_psk: &[u8; 32],
+        now_unix: u64,
+        name: String,
+        psk: [u8; 32],
+    ) -> Result<(Self, Tenant)> {
+        let code = self
+            .codes
+            .iter()
+            .find(|c| &c.psk == code_psk && c.expires_at.is_none_or(|at| now_unix < at))
+            .context("unknown, used or expired enrollment code")?;
+        let tenant = Tenant {
+            name,
+            psk,
+            sni: code.sni.clone(),
+            max_conns: code.max_conns,
+            disabled: false,
+        };
+        let codes = self
+            .codes
+            .iter()
+            .filter(|c| &c.psk != code_psk)
+            .cloned()
+            .collect();
+        let mut tenants = self.tenants.clone();
+        tenants.push(tenant.clone());
+        Ok((Self::new(tenants, codes)?, tenant))
+    }
+}
+
 /// On-disk shape of the tenant file.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct TenantFile {
