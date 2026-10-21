@@ -5,10 +5,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use erbridge::config::{ConnectConfig, ConnectTunnel, ServeConfig, ServeTunnel};
-use erbridge::reverse::connect::run_connect;
-use erbridge::reverse::serve::run_serve;
+use erbridge::reverse::connect::{run_connect, run_connect_with_shutdown};
+use erbridge::reverse::serve::{run_serve, run_serve_with_shutdown};
 use erbridge::stats::Registry;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn reverse_tunnel_roundtrip() {
@@ -278,4 +279,79 @@ async fn closes_the_client_when_b_cannot_reach_the_target() {
         .expect("A left the client hanging after B failed to reach the target")
         .expect("reading from the external connection");
     assert_eq!(read, 0, "expected the connection to be closed, got a byte");
+}
+
+#[tokio::test]
+async fn shutdown_stops_both_roles_and_releases_ports() {
+    let target_port = common::free_port();
+    let control_port = common::free_port();
+    let external_port = common::free_port();
+
+    let target_addr = format!("127.0.0.1:{target_port}").parse().unwrap();
+    tokio::spawn(common::run_tcp_echo_server(target_addr));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let serve_cfg = ServeConfig {
+        listen: format!("127.0.0.1:{control_port}"),
+        token: "shutdown-token".into(),
+        tunnel: vec![ServeTunnel {
+            name: "web".into(),
+            external: format!("127.0.0.1:{external_port}"),
+        }],
+    };
+    let connect_cfg = ConnectConfig {
+        server: format!("127.0.0.1:{control_port}"),
+        token: "shutdown-token".into(),
+        tunnel: vec![ConnectTunnel {
+            name: "web".into(),
+            target: format!("127.0.0.1:{target_port}"),
+        }],
+        reconnect_min_secs: 1,
+        reconnect_max_secs: 2,
+    };
+
+    let shutdown = CancellationToken::new();
+    let serve = tokio::spawn(run_serve_with_shutdown(
+        serve_cfg,
+        Registry::new(),
+        shutdown.clone(),
+    ));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let connect = tokio::spawn(run_connect_with_shutdown(
+        connect_cfg,
+        Registry::new(),
+        shutdown.clone(),
+    ));
+
+    // Hold one tunnelled connection open across the shutdown.
+    let external_addr: std::net::SocketAddr = format!("127.0.0.1:{external_port}").parse().unwrap();
+    let mut held = tokio::net::TcpStream::connect(external_addr).await.unwrap();
+    held.write_all(b"ping").await.unwrap();
+    let mut buf = [0u8; 4];
+    tokio::time::timeout(Duration::from_secs(5), held.read_exact(&mut buf))
+        .await
+        .expect("echo timed out")
+        .unwrap();
+
+    shutdown.cancel();
+
+    tokio::time::timeout(Duration::from_secs(2), serve)
+        .await
+        .expect("serve did not stop")
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), connect)
+        .await
+        .expect("connect did not stop")
+        .unwrap()
+        .unwrap();
+
+    // The held connection is torn down rather than left dangling.
+    let mut rest = Vec::new();
+    let closed = tokio::time::timeout(Duration::from_secs(2), held.read_to_end(&mut rest)).await;
+    assert!(closed.is_ok(), "held connection stayed open after shutdown");
+
+    // Both listeners are released.
+    std::net::TcpListener::bind(("127.0.0.1", external_port)).expect("external port still bound");
+    std::net::TcpListener::bind(("127.0.0.1", control_port)).expect("control port still bound");
 }
