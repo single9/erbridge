@@ -1,6 +1,6 @@
 # 04: Tenant store and hot reload
 
-**Status:** todo · **Crate:** erbridge-core · **Blocked by:** 03
+**Status:** done · **Crate:** erbridge-core · **Blocked by:** 03
 
 **What to build:** `TenantStore` trait (`snapshot`, `redeem`, `issue`,
 `revoke`), `MemoryStore`, `FileStore` (TOML, exclusive lock, atomic rename).

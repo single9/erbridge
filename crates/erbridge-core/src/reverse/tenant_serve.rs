@@ -32,17 +32,35 @@ use crate::reverse::serve::relay;
 use crate::sni;
 use crate::stats::Registry;
 use crate::tenant::{Identity, Tenant, TenantSet};
+use crate::tenant_store::{FileStore, TenantStore};
 
 /// How long a TLS client gets to send its ClientHello.
 const SNI_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How often the store is re-read for changes.
+const DEFAULT_RELOAD_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Where a store-backed multi-tenant `serve` listens, and how often it checks
+/// the store for changes.
+#[derive(Debug, Clone)]
+pub struct TenantServeConfig {
+    /// Control address tunnel clients dial.
+    pub listen: String,
+    /// Address that accepts TLS connections and routes them by SNI.
+    pub sni_listen: String,
+    pub reload_interval: Duration,
+}
+
 struct Session {
     id: u64,
+    /// The PSK this session authenticated with, to notice a rotation.
+    psk: [u8; 32],
     control: MuxControl,
     cancel: CancellationToken,
 }
 
 struct Hub {
+    store: Arc<dyn TenantStore>,
     set: watch::Sender<Arc<TenantSet>>,
     sessions: Mutex<HashMap<String, Session>>,
     next_session: AtomicU64,
@@ -70,22 +88,40 @@ pub(crate) async fn run_tenant_serve(
         .tenants_file
         .as_deref()
         .context("tenants_file is not set")?;
-    let sni_addr = cfg.sni_listen.as_deref().context("sni_listen is not set")?;
-    let initial = TenantSet::load(path.as_ref())?;
+    let sni_listen = cfg.sni_listen.clone().context("sni_listen is not set")?;
+    let tcfg = TenantServeConfig {
+        listen: cfg.listen.clone(),
+        sni_listen,
+        reload_interval: DEFAULT_RELOAD_INTERVAL,
+    };
+    run_tenant_serve_with_store(tcfg, Arc::new(FileStore::new(path)), registry, shutdown).await
+}
+
+/// Runs multi-tenant `serve` against any [`TenantStore`]. Returns `Ok(())` once
+/// `shutdown` is cancelled and every listener and session has been stopped.
+pub async fn run_tenant_serve_with_store(
+    cfg: TenantServeConfig,
+    store: Arc<dyn TenantStore>,
+    registry: Registry,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let initial = store.snapshot()?;
 
     let control_listener = TcpListener::bind(&cfg.listen)
         .await
         .with_context(|| format!("binding control listener on {}", cfg.listen))?;
-    let sni_listener = TcpListener::bind(sni_addr)
+    let sni_listener = TcpListener::bind(&cfg.sni_listen)
         .await
-        .with_context(|| format!("binding SNI listener on {sni_addr}"))?;
+        .with_context(|| format!("binding SNI listener on {}", cfg.sni_listen))?;
     registry.info(format!(
-        "serve: multi-tenant, {} tenant(s); tunnel clients on {}, TLS by SNI on {sni_addr}",
+        "serve: multi-tenant, {} tenant(s); tunnel clients on {}, TLS by SNI on {}",
         initial.tenants().len(),
-        cfg.listen
+        cfg.listen,
+        cfg.sni_listen
     ));
 
     let hub = Arc::new(Hub {
+        store,
         set: watch::channel(Arc::new(initial)).0,
         sessions: Mutex::new(HashMap::new()),
         next_session: AtomicU64::new(1),
@@ -108,7 +144,13 @@ pub(crate) async fn run_tenant_serve(
             async move { handle_sni(hub, sock, peer, &registry).await }
         }
     });
-    tokio::join!(control_loop, sni_loop);
+    let reload = reload_loop(
+        hub.clone(),
+        cfg.reload_interval,
+        registry.clone(),
+        shutdown.clone(),
+    );
+    tokio::join!(control_loop, sni_loop, reload);
     Ok(())
 }
 
@@ -187,6 +229,7 @@ async fn run_session(
         tenant.name.clone(),
         Session {
             id,
+            psk: tenant.psk,
             control,
             cancel,
         },
@@ -251,4 +294,67 @@ async fn handle_sni(
         registry,
     )
     .await
+}
+
+/// Re-reads the store every `interval` and applies what changed. A store that
+/// cannot be read or parsed leaves the previous tenants in force; the error is
+/// logged once per distinct message rather than on every tick.
+async fn reload_loop(
+    hub: Arc<Hub>,
+    interval: Duration,
+    registry: Registry,
+    shutdown: CancellationToken,
+) {
+    let watching = async {
+        let mut last_error: Option<String> = None;
+        loop {
+            tokio::time::sleep(interval).await;
+            let store = hub.store.clone();
+            let read = tokio::task::spawn_blocking(move || store.snapshot()).await;
+            match read {
+                Ok(Ok(next)) => {
+                    last_error = None;
+                    if *hub.snapshot() != next {
+                        apply(&hub, next, &registry);
+                    }
+                }
+                Ok(Err(e)) => {
+                    let message = format!("{e:#}");
+                    if last_error.as_deref() != Some(message.as_str()) {
+                        registry.error(format!(
+                            "serve: keeping the previous tenants, could not reload: {message}"
+                        ));
+                        last_error = Some(message);
+                    }
+                }
+                Err(e) => registry.error(format!("serve: tenant reload task failed: {e}")),
+            }
+        }
+    };
+    shutdown.run_until_cancelled(watching).await;
+}
+
+/// Publishes a new snapshot and ends the session of every tenant that is gone,
+/// disabled or holds a different PSK now. Other sessions are not touched.
+fn apply(hub: &Hub, next: TenantSet, registry: &Registry) {
+    let next = Arc::new(next);
+    hub.set.send_replace(next.clone());
+
+    let mut sessions = hub.sessions.lock().unwrap();
+    sessions.retain(|name, session| {
+        let still_valid = next
+            .tenant(name)
+            .is_some_and(|t| !t.disabled && t.psk == session.psk);
+        if !still_valid {
+            session.cancel.cancel();
+            registry.info(format!(
+                "serve: tenant '{name}' no longer allowed, session ended"
+            ));
+        }
+        still_valid
+    });
+    registry.info(format!(
+        "serve: reloaded tenants, {} now configured",
+        next.tenants().len()
+    ));
 }
