@@ -1,6 +1,6 @@
 # 06: Enrollment codes
 
-**Status:** todo · **Crate:** erbridge-core · **Blocked by:** 04
+**Status:** done · **Crate:** erbridge-core · **Blocked by:** 04
 
 **What to build:** single-use enrollment codes and the client side.
 

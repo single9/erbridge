@@ -159,6 +159,42 @@ fn check_entry(sni: &str, max_conns: usize, what: &str) -> Result<()> {
     Ok(())
 }
 
+/// `bytes` random bytes from the OS-seeded CSPRNG, as lowercase hex.
+fn random_hex(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    rand::fill(&mut buf[..]);
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A fresh tenant name, `t-` and 12 hex characters. Chosen by the server, never
+/// by a client.
+pub fn new_tenant_name() -> String {
+    format!("t-{}", random_hex(6))
+}
+
+/// A fresh long-term tenant token: 256 random bits as hex.
+pub fn new_token() -> String {
+    random_hex(32)
+}
+
+/// A fresh enrollment code (128 random bits as hex) and the entry that
+/// redeems it, bound to `sni`. The code itself is shown to whoever enrolls and
+/// is not stored.
+pub fn new_enroll_code(
+    sni: &str,
+    max_conns: usize,
+    expires_at: Option<u64>,
+) -> (String, EnrollCode) {
+    let code = random_hex(16);
+    let entry = EnrollCode {
+        psk: crate::noise::derive_psk(&code),
+        sni: sni.to_string(),
+        max_conns,
+        expires_at,
+    };
+    (code, entry)
+}
+
 /// Edits. Each returns a new validated set and leaves `self` untouched.
 impl TenantSet {
     pub fn with_tenant(&self, tenant: Tenant) -> Result<Self> {
@@ -410,6 +446,21 @@ mod tests {
         assert!(text.contains(&format!("psk = \"{}\"", hex_of(&derive_psk("ta")))));
         assert!(!text.contains("\"ta\""), "the token must never be stored");
         assert_eq!(toml::from_str::<File>(&text).unwrap(), original);
+    }
+
+    #[test]
+    fn generated_names_tokens_and_codes_are_well_formed_and_unique() {
+        let mut seen = HashSet::new();
+        for _ in 0..1000 {
+            let name = new_tenant_name();
+            assert!(name.starts_with("t-") && name.len() == 14, "{name}");
+            let token = new_token();
+            assert_eq!(token.len(), 64);
+            let (code, entry) = new_enroll_code("a.x", 4, None);
+            assert_eq!(code.len(), 32);
+            assert_eq!(entry.psk, derive_psk(&code));
+            assert!(seen.insert(name) && seen.insert(token) && seen.insert(code));
+        }
     }
 
     #[test]

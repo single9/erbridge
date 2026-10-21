@@ -9,9 +9,11 @@ use std::time::Duration;
 use erbridge_core::config::{ConnectConfig, ConnectTunnel, ServeConfig};
 use erbridge_core::noise;
 use erbridge_core::reverse::connect::run_connect_with_shutdown;
+use erbridge_core::reverse::enroll::{Credentials, enroll_with_timeout};
 use erbridge_core::reverse::serve::run_serve_with_shutdown;
 use erbridge_core::reverse::tenant_serve::{TenantServeConfig, run_tenant_serve_with_store};
 use erbridge_core::stats::Registry;
+use erbridge_core::tenant::new_enroll_code;
 use erbridge_core::tenant::{Tenant, TenantSet};
 use erbridge_core::tenant_store::{FileStore, TenantStore};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -601,5 +603,124 @@ async fn a_changed_limit_applies_to_new_connections_after_reload() {
     let _two = open_held_when_free(&serve, "a.example.com").await;
     let _three = open_held_when_free(&serve, "a.example.com").await;
     assert!(open_held(&serve, "a.example.com").await.is_none());
+    serve.shutdown.cancel();
+}
+
+/// Issues a code and waits out a few reload intervals, the way a real code is
+/// only used some seconds after it is issued.
+async fn issue_and_settle(store: &FileStore, entry: erbridge_core::tenant::EnrollCode) {
+    store.issue_code(entry).unwrap();
+    tokio::time::sleep(Duration::from_millis(250)).await;
+}
+
+async fn enroll_now(serve: &Serve, code: &str) -> anyhow::Result<Credentials> {
+    enroll_with_timeout(&serve.control, code, Duration::from_secs(3)).await
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+#[tokio::test]
+async fn a_valid_code_yields_credentials_that_then_connect_as_the_new_tenant() {
+    let (serve, store) = start_serve_fast_reload(vec![]).await;
+    let (code, entry) = new_enroll_code("new.example.com", 4, Some(unix_now() + 60));
+    issue_and_settle(&store, entry).await;
+
+    let creds = enroll_now(&serve, &code).await.unwrap();
+    assert!(creds.name.starts_with("t-"));
+    assert_eq!(creds.sni, "new.example.com");
+
+    // Persisted: the tenant exists and the code is gone.
+    let snap = store.snapshot().unwrap();
+    assert_eq!(snap.tenant(&creds.name).unwrap().max_conns, 4);
+    assert!(snap.codes().is_empty());
+
+    let (addr, _) = target("NEW:").await;
+    let _c = spawn_connect(&serve, &creds.token, &[(&creds.name, addr)]);
+    wait_until_online(&serve, "new.example.com", "NEW:").await;
+    serve.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_code_works_once_and_not_after_it_expires() {
+    let (serve, store) = start_serve_fast_reload(vec![]).await;
+    let (code, entry) = new_enroll_code("once.example.com", 4, None);
+    issue_and_settle(&store, entry).await;
+    assert!(enroll_now(&serve, &code).await.is_ok());
+    assert!(enroll_now(&serve, &code).await.is_err(), "second use");
+
+    let (expired, entry) = new_enroll_code("late.example.com", 4, Some(1));
+    issue_and_settle(&store, entry).await;
+    assert!(enroll_now(&serve, &expired).await.is_err(), "expired");
+
+    assert_eq!(store.snapshot().unwrap().tenants().len(), 1);
+    serve.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn racing_redemptions_of_one_code_produce_exactly_one_tenant() {
+    let (serve, store) = start_serve_fast_reload(vec![]).await;
+    let (code, entry) = new_enroll_code("race.example.com", 4, None);
+    issue_and_settle(&store, entry).await;
+
+    let attempts: Vec<_> = (0..6)
+        .map(|_| {
+            let (control, code) = (serve.control.clone(), code.clone());
+            tokio::spawn(async move {
+                enroll_with_timeout(&control, &code, Duration::from_secs(3)).await
+            })
+        })
+        .collect();
+    let mut wins = 0;
+    for a in attempts {
+        if a.await.unwrap().is_ok() {
+            wins += 1;
+        }
+    }
+    assert_eq!(wins, 1);
+    assert_eq!(store.snapshot().unwrap().tenants().len(), 1);
+    serve.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn codes_and_tenant_tokens_are_not_interchangeable() {
+    let (serve, store) =
+        start_serve_fast_reload(vec![tenant("ta", "token-a", "a.example.com")]).await;
+    let (code, entry) = new_enroll_code("fresh.example.com", 4, None);
+    issue_and_settle(&store, entry).await;
+
+    // A tenant's token does not enroll anyone.
+    assert!(enroll_now(&serve, "token-a").await.is_err());
+    assert_eq!(store.snapshot().unwrap().tenants().len(), 1);
+
+    // A code never opens a session: nothing becomes routable for its host.
+    let (addr, _) = target("X:").await;
+    let _c = spawn_connect(&serve, &code, &[("anything", addr)]);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        hello_and_read(&serve, "fresh.example.com", 1)
+            .await
+            .is_empty()
+    );
+    serve.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn many_enrollments_get_distinct_names_and_tokens() {
+    let (serve, store) = start_serve_fast_reload(vec![]).await;
+    let mut names = std::collections::HashSet::new();
+    let mut tokens = std::collections::HashSet::new();
+    for i in 0..15 {
+        let (code, entry) = new_enroll_code(&format!("h{i}.example.com"), 4, None);
+        issue_and_settle(&store, entry).await;
+        let creds = enroll_now(&serve, &code).await.unwrap();
+        assert!(names.insert(creds.name));
+        assert!(tokens.insert(creds.token));
+    }
+    assert_eq!(store.snapshot().unwrap().tenants().len(), 15);
     serve.shutdown.cancel();
 }
