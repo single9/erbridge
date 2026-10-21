@@ -2,9 +2,9 @@ mod common;
 
 use std::time::Duration;
 
-use erbridge::config::{ForwardRule, ProtocolKind};
-use erbridge::forward::run_forward;
-use erbridge::stats::Registry;
+use erbridge_core::config::{ForwardRule, ProtocolKind};
+use erbridge_core::forward::run_forward;
+use erbridge_core::stats::Registry;
 use tokio::net::UdpSocket;
 
 #[tokio::test]

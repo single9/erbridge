@@ -43,21 +43,14 @@ payment are out of scope; erbridge treats a tenant's `sni` as an opaque string.
 
 ## Library readiness (prerequisites for embedding)
 
-The crate is already `lib` + `bin`, but is not yet an embeddable core:
+The project is a workspace: `erbridge-core` (the library) and `erbridge` (the
+CLI and TUI binary). Done: the split, `run_serve_with_shutdown` /
+`run_connect_with_shutdown`, and `Registry::subscribe`. Still to do:
 
-- `cli` and `tui` are public modules and `clap`/`ratatui`/`crossterm` are
-  unconditional dependencies. Gate them behind a default-on `cli` feature so
-  embedders (e.g. a tray app running `connect`) do not pull them in.
-- `run_serve` / `run_connect` loop forever and have no shutdown handle.
-  Dropping the future does not stop the tasks they spawned. Add a handle with
-  `shutdown()` (cancellation token) that stops listeners and sessions.
 - Tenant logic goes in a socket-free core module behind a `TenantStore` trait
   (in-memory and file-backed impls) so a host can plug in its own storage and
   the logic is unit-testable without sockets.
-- `Registry` couples stats to the log file and TUI; keep it, but make the log
-  file optional and the event stream consumable without the TUI.
-- Shrink the public surface to what embedders need; make the rest `pub(crate)`.
 
 ## Estimate
 
-About 3 days for items 1-7, plus about 1 day for the library-readiness work.
+About 3 days for items 1-7, including the `TenantStore` module.

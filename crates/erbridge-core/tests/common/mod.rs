@@ -69,8 +69,8 @@ pub async fn tcp_roundtrip(addr: SocketAddr, payload: &[u8]) -> Vec<u8> {
 /// self-signed cert the same way `connect` accepts `serve`'s (see `tls`
 /// module docs: confidentiality, not peer identity).
 pub async fn tls_roundtrip(addr: SocketAddr, payload: &[u8]) -> Vec<u8> {
-    erbridge::tls::install_crypto_provider();
-    let connector = TlsConnector::from(erbridge::tls::client_tls_config().unwrap());
+    erbridge_core::tls::install_crypto_provider();
+    let connector = TlsConnector::from(erbridge_core::tls::client_tls_config().unwrap());
     let tcp = tokio::net::TcpStream::connect(addr)
         .await
         .expect("connect to forwarded port");

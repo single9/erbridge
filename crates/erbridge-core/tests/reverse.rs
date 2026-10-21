@@ -4,10 +4,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use erbridge::config::{ConnectConfig, ConnectTunnel, ServeConfig, ServeTunnel};
-use erbridge::reverse::connect::{run_connect, run_connect_with_shutdown};
-use erbridge::reverse::serve::{run_serve, run_serve_with_shutdown};
-use erbridge::stats::Registry;
+use erbridge_core::config::{ConnectConfig, ConnectTunnel, ServeConfig, ServeTunnel};
+use erbridge_core::reverse::connect::{run_connect, run_connect_with_shutdown};
+use erbridge_core::reverse::serve::{run_serve, run_serve_with_shutdown};
+use erbridge_core::stats::Registry;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 

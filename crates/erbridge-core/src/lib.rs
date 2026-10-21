@@ -4,9 +4,9 @@
 //! and to observe what it is doing:
 //!
 //! ```no_run
-//! use erbridge::config::{ConnectConfig, ConnectTunnel};
-//! use erbridge::reverse::connect::run_connect_with_shutdown;
-//! use erbridge::stats::{Event, Registry};
+//! use erbridge_core::config::{ConnectConfig, ConnectTunnel};
+//! use erbridge_core::reverse::connect::run_connect_with_shutdown;
+//! use erbridge_core::stats::{Event, Registry};
 //! use tokio_util::sync::CancellationToken;
 //!
 //! # async fn demo() -> anyhow::Result<()> {
@@ -38,11 +38,9 @@
 //! # }
 //! ```
 //!
-//! The command-line parser and terminal UI live behind the default-on `cli`
-//! feature; build with `default-features = false` to leave them out.
+//! The command-line interface and terminal UI are in the separate `erbridge`
+//! crate, so depending on this one pulls in neither.
 
-#[cfg(feature = "cli")]
-pub mod cli;
 pub mod client;
 pub mod config;
 pub mod forward;
@@ -56,5 +54,3 @@ pub mod reverse;
 pub mod stats;
 #[doc(hidden)]
 pub mod tls;
-#[cfg(feature = "cli")]
-pub mod tui;

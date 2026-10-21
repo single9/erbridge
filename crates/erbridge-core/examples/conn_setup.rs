@@ -12,9 +12,9 @@
 //! tail all agree, and it is large.
 use std::time::{Duration, Instant};
 
-use erbridge::config::{ConnectConfig, ConnectTunnel, ServeConfig, ServeTunnel};
-use erbridge::reverse::{connect::run_connect, serve::run_serve};
-use erbridge::stats::Registry;
+use erbridge_core::config::{ConnectConfig, ConnectTunnel, ServeConfig, ServeTunnel};
+use erbridge_core::reverse::{connect::run_connect, serve::run_serve};
+use erbridge_core::stats::Registry;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 

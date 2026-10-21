@@ -50,9 +50,9 @@ jobs:
 
           sed -i -E "0,/^version = \".*\"/s//version = \"$NEW_VERSION\"/" Cargo.toml
 
-          # Cargo.lock's erbridge entry: update the version line right after the matching name line.
+          # Cargo.lock's erbridge and erbridge-core entries: update the version line right after the matching name line.
           awk -v ver="$NEW_VERSION" '
-            /^name = "erbridge"$/ { print; getline; sub(/version = ".*"/, "version = \"" ver "\""); print; next }
+            /^name = "erbridge(-core)?"$/ { print; getline; sub(/version = ".*"/, "version = \"" ver "\""); print; next }
             { print }
           ' Cargo.lock > Cargo.lock.new && mv Cargo.lock.new Cargo.lock
 

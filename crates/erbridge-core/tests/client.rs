@@ -2,10 +2,10 @@ mod common;
 
 use std::time::Duration;
 
-use erbridge::client::run_client;
-use erbridge::config::{ClientRule, ForwardRule, ProtocolKind, Transport};
-use erbridge::forward::run_forward;
-use erbridge::stats::Registry;
+use erbridge_core::client::run_client;
+use erbridge_core::config::{ClientRule, ForwardRule, ProtocolKind, Transport};
+use erbridge_core::forward::run_forward;
+use erbridge_core::stats::Registry;
 
 #[tokio::test]
 async fn client_reaches_token_secured_forward_mapping() {

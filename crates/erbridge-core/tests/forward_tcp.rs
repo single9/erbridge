@@ -2,9 +2,9 @@ mod common;
 
 use std::time::Duration;
 
-use erbridge::config::{ForwardRule, ProtocolKind};
-use erbridge::forward::run_forward;
-use erbridge::stats::Registry;
+use erbridge_core::config::{ForwardRule, ProtocolKind};
+use erbridge_core::forward::run_forward;
+use erbridge_core::stats::Registry;
 
 #[tokio::test]
 async fn forwards_tcp_traffic_to_target() {
@@ -52,7 +52,7 @@ async fn forwards_tls_tcp_traffic_to_plaintext_target() {
         target: format!("127.0.0.1:{target_port}"),
         protocol: ProtocolKind::Tcp,
         udp_idle_secs: 60,
-        transport: Some(erbridge::config::Transport::Tls),
+        transport: Some(erbridge_core::config::Transport::Tls),
         token: None,
     };
     let registry = Registry::new();
