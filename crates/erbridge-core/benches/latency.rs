@@ -21,13 +21,13 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
-use erbridge::config::{
+use erbridge_core::config::{
     ConnectConfig, ConnectTunnel, ForwardRule, ProtocolKind, ServeConfig, ServeTunnel,
 };
-use erbridge::forward::run_forward;
-use erbridge::reverse::connect::run_connect;
-use erbridge::reverse::serve::run_serve;
-use erbridge::stats::Registry;
+use erbridge_core::forward::run_forward;
+use erbridge_core::reverse::connect::run_connect;
+use erbridge_core::reverse::serve::run_serve;
+use erbridge_core::stats::Registry;
 
 /// Fixed-size ping payload; big enough to be a realistic small message,
 /// small enough that framing/mux overhead (not memcpy) dominates the timing.

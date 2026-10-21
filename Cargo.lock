@@ -788,11 +788,20 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
- "criterion",
  "crossterm",
+ "erbridge-core",
+ "ratatui",
+ "tokio",
+]
+
+[[package]]
+name = "erbridge-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "criterion",
  "futures",
  "rand 0.10.2",
- "ratatui",
  "rcgen",
  "rustls",
  "rustls-pki-types",

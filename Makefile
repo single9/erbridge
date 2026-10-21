@@ -158,7 +158,7 @@ test:
 
 ## Latency benchmark: baseline vs forward vs serve/connect roundtrip, HTML report in target/criterion/
 bench:
-	cargo bench --bench latency
+	cargo bench -p erbridge-core --bench latency
 
 ## Same ping-pong methodology, but against external tunnels (frp/rathole/bore) for comparison.
 ## Needs frpc/frps/rathole/bore-cli on PATH (brew install frpc frps rathole bore-cli), or point
@@ -171,7 +171,7 @@ bench:
 ##   make compare-tunnels                     # one round
 ##   make compare-tunnels COMPARE_ROUNDS=10   # ten rounds, settling between each
 compare-tunnels:
-	cargo build --release --example compare_tunnels
+	cargo build --release -p erbridge-core --example compare_tunnels
 	@echo "settling $(COMPARE_SETTLE)s before measuring..."
 	@sleep $(COMPARE_SETTLE)
 	@for i in $$(seq 1 $(COMPARE_ROUNDS)); do \

@@ -3,13 +3,16 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
-use erbridge::cli::{Cli, Command};
-use erbridge::config::{
+mod cli;
+mod tui;
+
+use cli::{Cli, Command};
+use erbridge_core::config::{
     self, ClientRule, ConnectConfig, ConnectTunnel, FileConfig, ForwardRule, ServeConfig,
     ServeTunnel,
 };
-use erbridge::stats::Registry;
-use erbridge::{client, forward, reverse, tui};
+use erbridge_core::stats::Registry;
+use erbridge_core::{client, forward, reverse};
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -1,6 +1,6 @@
 # TLS vs Noise reverse-tunnel latency
 
-Measured while migrating the `serve`/`connect` control channel (and `forward`/`client`'s `transport = "noise"` mappings) from TLS to the Noise protocol, to check whether the switch cost any steady-state latency (see README's Security notes for why that migration happened). Recorded here so a future change to `src/noise.rs`, the `snow` dependency, or its Cargo features can be checked against a known-good number instead of re-deriving one from scratch.
+Measured while migrating the `serve`/`connect` control channel (and `forward`/`client`'s `transport = "noise"` mappings) from TLS to the Noise protocol, to check whether the switch cost any steady-state latency (see README's Security notes for why that migration happened). Recorded here so a future change to `crates/erbridge-core/src/noise.rs`, the `snow` dependency, or its Cargo features can be checked against a known-good number instead of re-deriving one from scratch.
 
 Absolute numbers below are specific to the machine they were measured on and are only meaningful relative to each other, not as a portable latency figure.
 
@@ -19,7 +19,7 @@ No measurable difference, after two prerequisites were met:
 1. `snow` built with the `ring-accelerated` feature (`Cargo.toml`), so ChaCha20-Poly1305 and X25519 run through `ring` instead of the pure-Rust default resolver. BLAKE2s has no `ring` implementation and keeps using the default resolver as a fallback.
 2. The measuring machine's CPU governor set to `performance`, not `powersave` (see "Environment note" below) — required for either version to produce a stable number at all, not specific to Noise.
 
-With both in place, `reverse_tunnel_tcp_roundtrip` (a 64-byte ping over an already-open connection, `benches/latency.rs`) lands at essentially the same latency for TLS and Noise:
+With both in place, `reverse_tunnel_tcp_roundtrip` (a 64-byte ping over an already-open connection, `crates/erbridge-core/benches/latency.rs`) lands at essentially the same latency for TLS and Noise:
 
 | Transport | Run 1 [low mid high] | Run 2 [low mid high] |
 |---|---|---|
@@ -29,7 +29,7 @@ With both in place, `reverse_tunnel_tcp_roundtrip` (a 64-byte ping over an alrea
 
 The default-resolver row is included because it's the regression a future contributor might reintroduce by removing the `ring-accelerated` feature (e.g. while trying to drop the `ring` dependency): roughly **+5.7 µs (+14%)** over TLS, reproduced across two independent runs.
 
-Cross-checked against `examples/compare_tunnels.rs`, which drives the same tunnel end-to-end alongside frp/rathole/bore rather than through Criterion:
+Cross-checked against `crates/erbridge-core/examples/compare_tunnels.rs`, which drives the same tunnel end-to-end alongside frp/rathole/bore rather than through Criterion:
 
 | Tool | TLS p50 | Noise (`ring-accelerated`) p50 |
 |---|---|---|

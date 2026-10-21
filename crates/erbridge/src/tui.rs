@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
-use crate::stats::Registry;
+use erbridge_core::stats::Registry;
 
 const TICK: Duration = Duration::from_millis(250);
 
@@ -64,10 +64,10 @@ pub async fn run(registry: Registry) -> Result<()> {
 
 fn render(
     frame: &mut Frame,
-    totals: &crate::stats::Totals,
+    totals: &erbridge_core::stats::Totals,
     rate_in: f64,
     rate_out: f64,
-    live: &[crate::stats::ConnectionInfo],
+    live: &[erbridge_core::stats::ConnectionInfo],
     log: &[String],
 ) {
     let area = frame.area();
@@ -90,7 +90,7 @@ fn render(
 fn render_summary(
     frame: &mut Frame,
     area: Rect,
-    totals: &crate::stats::Totals,
+    totals: &erbridge_core::stats::Totals,
     rate_in: f64,
     rate_out: f64,
 ) {
@@ -107,7 +107,11 @@ fn render_summary(
     frame.render_widget(Paragraph::new(text).block(block), area);
 }
 
-fn render_connections(frame: &mut Frame, area: Rect, live: &[crate::stats::ConnectionInfo]) {
+fn render_connections(
+    frame: &mut Frame,
+    area: Rect,
+    live: &[erbridge_core::stats::ConnectionInfo],
+) {
     let header = Row::new(vec![
         "label",
         "proto",

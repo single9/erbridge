@@ -133,12 +133,12 @@ sha256sum -c SHA256SUMS --ignore-missing
 Install the `erbridge` binary onto your system's `PATH` via `cargo install`:
 
 ```sh
-cargo install --path .
+cargo install --path crates/erbridge
 ```
 
 This builds a release binary and copies it to `~/.cargo/bin/erbridge` (make sure that
 directory is on your `PATH`; `cargo install` prints a warning if it isn't). Run
-`cargo install --path . --force` to reinstall after pulling new changes.
+`cargo install --path crates/erbridge --force` to reinstall after pulling new changes.
 
 ### Run as a systemd service (Linux)
 
@@ -336,7 +336,7 @@ make test    # equivalent to cargo test: covers forward's TCP/UDP forwarding, UD
 make bench   # equivalent to: cargo bench --bench latency
 ```
 
-`benches/latency.rs` measures steady-state TCP round-trip latency (a 64-byte
+`crates/erbridge-core/benches/latency.rs` measures steady-state TCP round-trip latency (a 64-byte
 ping over an already-open connection, not connection setup) across the three
 data paths, all on loopback:
 
@@ -358,7 +358,7 @@ throughput/jitter) instead.
 make compare-tunnels   # equivalent to: cargo run --release --example compare_tunnels
 ```
 
-`examples/compare_tunnels.rs` runs the same persistent-connection ping-pong
+`crates/erbridge-core/examples/compare_tunnels.rs` runs the same persistent-connection ping-pong
 against erbridge's `serve`/`connect` reverse tunnel and three other NAT-traversal
 tools — [frp](https://github.com/fatedier/frp), [rathole](https://github.com/rathole-org/rathole),
 and [bore](https://github.com/ekzhang/bore) — all on the same machine, same

@@ -48,9 +48,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 
-use erbridge::mux;
-use erbridge::proxy::pipe_bidirectional_tracked;
-use erbridge::tls;
+use erbridge_core::mux;
+use erbridge_core::proxy::pipe_bidirectional_tracked;
+use erbridge_core::tls;
 
 const PAYLOAD: &[u8; 64] = &[0x42; 64];
 const WARMUP: usize = 200;

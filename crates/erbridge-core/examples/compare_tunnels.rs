@@ -19,10 +19,10 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use erbridge::config::{ConnectConfig, ConnectTunnel, ServeConfig, ServeTunnel};
-use erbridge::reverse::connect::run_connect;
-use erbridge::reverse::serve::run_serve;
-use erbridge::stats::Registry;
+use erbridge_core::config::{ConnectConfig, ConnectTunnel, ServeConfig, ServeTunnel};
+use erbridge_core::reverse::connect::run_connect;
+use erbridge_core::reverse::serve::run_serve;
+use erbridge_core::stats::Registry;
 
 const PAYLOAD: &[u8; 64] = &[0x42; 64];
 const WARMUP: usize = 200;
