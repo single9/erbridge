@@ -25,6 +25,7 @@
 //! a full A<->B round trip in front of every new connection.
 
 pub mod connect;
+pub mod enroll;
 pub mod serve;
 pub mod tenant_serve;
 

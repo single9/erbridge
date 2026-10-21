@@ -19,7 +19,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -28,10 +29,12 @@ use tokio_util::sync::CancellationToken;
 use crate::config::ServeConfig;
 use crate::mux::{self, MuxControl};
 use crate::noise;
+use crate::reverse::enroll::Credentials;
 use crate::reverse::serve::relay;
+use crate::reverse::write_frame;
 use crate::sni;
 use crate::stats::Registry;
-use crate::tenant::{Identity, Tenant, TenantSet};
+use crate::tenant::{self, EnrollCode, Identity, Tenant, TenantSet};
 use crate::tenant_store::{FileStore, TenantStore};
 
 /// How long a TLS client gets to send its ClientHello.
@@ -228,7 +231,7 @@ async fn handle_control(
         Identity::Tenant(tenant) => {
             run_session(&hub, tenant, stream, peer, registry, shutdown).await
         }
-        Identity::Code(_) => bail!("enrollment is not available yet"),
+        Identity::Code(code) => run_enrollment(&hub, code, stream, peer, registry).await,
     }
 }
 
@@ -394,4 +397,46 @@ fn apply(hub: &Hub, next: TenantSet, registry: &Registry) {
         "serve: reloaded tenants, {} now configured",
         next.tenants().len()
     ));
+}
+
+/// Redeems an enrollment code: creates the tenant, persists it, and sends the
+/// credentials back inside the encrypted channel. The code is burned before the
+/// credentials are sent, so a client that never receives them needs a new code.
+async fn run_enrollment(
+    hub: &Hub,
+    code: EnrollCode,
+    mut stream: noise::NoiseStream<TcpStream>,
+    peer: SocketAddr,
+    registry: &Registry,
+) -> Result<()> {
+    let name = tenant::new_tenant_name();
+    let token = tenant::new_token();
+    let psk = noise::derive_psk(&token);
+
+    let store = hub.store.clone();
+    let (code_psk, now, new_name) = (code.psk, now_unix(), name.clone());
+    let created = tokio::task::spawn_blocking(move || store.redeem(&code_psk, now, new_name, psk))
+        .await
+        .context("enrollment task failed")??;
+
+    // Let the new tenant connect right away instead of after the next reload.
+    let store = hub.store.clone();
+    if let Ok(Ok(next)) = tokio::task::spawn_blocking(move || store.snapshot()).await {
+        apply(hub, next, registry);
+    }
+
+    let credentials = Credentials {
+        name,
+        token,
+        sni: created.sni.clone(),
+    };
+    write_frame(&mut stream, &serde_json::to_vec(&credentials)?)
+        .await
+        .context("sending credentials")?;
+    let _ = stream.shutdown().await;
+    registry.info(format!(
+        "serve: enrolled tenant '{}' for {} from {peer}",
+        created.name, created.sni
+    ));
+    Ok(())
 }

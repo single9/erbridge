@@ -15,7 +15,7 @@ own secret) cannot.
 
 ## Model
 
-- **Tenant:** `name` (server-assigned, `t-` + 8 hex), `psk` (hex of
+- **Tenant:** `name` (server-assigned, `t-` + 12 hex), `psk` (hex of
   `derive_psk(token)`; the token itself is never stored), `sni`, `max_conns`
   (default 64), `disabled`.
 - **Enrollment code:** a single-use PSK, optionally expiring, bound to an `sni`
@@ -47,8 +47,9 @@ own secret) cannot.
    excess connections are closed.
 6. **Enrollment.** `connect`-side `enroll(server, code)` handshakes with PSK =
    code. Inside the encrypted channel `serve` burns the code, creates the tenant
-   (random name, random 32-byte hex token), persists it, and sends
-   `{name, token, sni}`. Later connections use the token. Redemption is atomic
+   (random name, random 256-bit hex token), persists it, and sends
+   `{name, token, sni}`. A newly issued code becomes usable within one reload
+   interval (1 s by default). Later connections use the token. Redemption is atomic
    under a file lock; a code works once and not after expiry.
 7. **Store.** `TenantStore` trait with in-memory and file-backed
    implementations. The file is written by atomic rename under an exclusive
