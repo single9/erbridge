@@ -88,8 +88,11 @@ its own independent stream.
 
 ## Build
 
+The repository is a Cargo workspace with two crates: `erbridge-core` (the library) and
+`erbridge` (the command-line binary, with the terminal UI).
+
 ```sh
-cargo build --release
+cargo build --release    # -> target/release/erbridge
 ```
 
 Cross-compilation (mirrors the other Rust sub-projects in this repo):
@@ -322,18 +325,54 @@ before changing that feature or the `snow` dependency.
 
 See [`config.example.toml`](config.example.toml) for a complete example. The sections are independent of each other; the same config file can fill in just one section or all of them. CLI arguments (`--listen`/`--token`/`--server`/`--map`/`--tunnel`) can override or supplement the config file's contents.
 
+## Use as a library
+
+`erbridge-core` has no command-line or terminal-UI dependencies, so another program can
+embed a tunnel directly. This runs the `connect` role, reports its events, and stops it on
+demand:
+
+```rust
+use erbridge_core::config::{ConnectConfig, ConnectTunnel};
+use erbridge_core::reverse::connect::run_connect_with_shutdown;
+use erbridge_core::stats::{Event, Registry};
+use tokio_util::sync::CancellationToken;
+
+let cfg = ConnectConfig {
+    server: "relay.example.com:9000".into(),
+    token: "secret".into(),
+    tunnel: vec![ConnectTunnel { name: "web".into(), target: "127.0.0.1:8080".into() }],
+    reconnect_min_secs: 1,
+    reconnect_max_secs: 30,
+};
+
+let registry = Registry::new();
+let mut events = registry.subscribe();          // structured `Event`s, not log lines
+let shutdown = CancellationToken::new();
+let task = tokio::spawn(run_connect_with_shutdown(cfg, registry, shutdown.clone()));
+
+// ... later: stops the session, in-flight connections and reconnect loop
+shutdown.cancel();
+task.await??;
+```
+
+`run_serve_with_shutdown` works the same way for the `serve` role, and returns once every
+listener and tunnelled connection is closed and its port released. `run_serve` and
+`run_connect` are the same without a shutdown handle. The crate is not published to
+crates.io yet; depend on it with a `git` or `path` dependency.
+
 ## Tests
 
 ```sh
 make test    # equivalent to cargo test: covers forward's TCP/UDP forwarding, UDP idle timeout,
              # TLS- and Noise-secured forward mappings, client mode against both, the Noise
-             # transport itself, and serve/connect's multiplexed forwarding and PSK authentication
+             # transport itself, serve/connect's multiplexed forwarding and PSK authentication, and
+             # shutdown of both roles
 ```
 
 ## Latency benchmark
 
 ```sh
-make bench   # equivalent to: cargo bench --bench latency
+make bench   # equivalent to: cargo bench -p erbridge-core --bench latency
 ```
 
 `crates/erbridge-core/benches/latency.rs` measures steady-state TCP round-trip latency (a 64-byte
@@ -355,7 +394,7 @@ throughput/jitter) instead.
 ### Comparing against frp / rathole / bore
 
 ```sh
-make compare-tunnels   # equivalent to: cargo run --release --example compare_tunnels
+make compare-tunnels   # equivalent to: cargo run --release -p erbridge-core --example compare_tunnels
 ```
 
 `crates/erbridge-core/examples/compare_tunnels.rs` runs the same persistent-connection ping-pong
