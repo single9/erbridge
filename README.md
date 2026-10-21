@@ -190,6 +190,33 @@ cosign verify-blob \
 sha256sum -c SHA256SUMS --ignore-missing
 ```
 
+### Publishing to crates.io
+
+`erbridge-core` and `erbridge` are published by the Release workflow, core first. The last job
+(`publish-crates`) runs only after every binary built and the GitHub release exists.
+
+One-time setup:
+
+1. On crates.io, create an API token with the `publish-new` and `publish-update` scopes
+   (restrict it to the `erbridge` and `erbridge-core` crates once they exist).
+2. In the GitHub repo, add it as the secret `CARGO_REGISTRY_TOKEN` (repository secret, or a
+   secret of the `crates-io` environment, which the job uses; add required reviewers to that
+   environment if you want a manual approval before anything is published).
+
+The first release has to create both crate names, so the token needs `publish-new` at that point.
+
+Run the workflow with **publish** unticked for a dry run: it builds and packages everything and
+skips only the upload. The CI workflow does the same check on every push
+(`cargo publish --workspace --dry-run`). Publishing is permanent, so a bad release is fixed by
+yanking the version and releasing the next patch.
+
+If only `publish-crates` failed (for example an expired token), fix the secret and publish the
+tag by hand:
+
+```sh
+git checkout vX.Y.Z && cargo publish --workspace
+```
+
 ## Quick start
 
 ### forward: direct forwarding

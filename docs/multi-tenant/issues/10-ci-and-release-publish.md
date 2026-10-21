@@ -1,6 +1,6 @@
 # 10: CI and crates.io publishing
 
-**Status:** todo · **Blocked by:** 09
+**Status:** done · **Blocked by:** 09
 
 **What to build:**
 
@@ -14,5 +14,5 @@
 - CI passes on a clean checkout.
 - Release workflow is syntax-checked (`actionlint` if available) and a dry run
   mode (`publish: false` input) exercises everything except the upload.
-- The secret name and setup steps are documented in `RELEASING` notes in the
-  README.
+- The secret name and setup steps are documented in the README under
+  "Publishing to crates.io".
