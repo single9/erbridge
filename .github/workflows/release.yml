@@ -49,6 +49,9 @@ jobs:
           NEW_TAG="v$NEW_VERSION"
 
           sed -i -E "0,/^version = \".*\"/s//version = \"$NEW_VERSION\"/" Cargo.toml
+          # The erbridge-core path dependency carries its own version for crates.io; keep it equal.
+          sed -i -E "s|^(erbridge-core = \{ path = \"crates/erbridge-core\", version = \")[^\"]*(\" \})|\1$NEW_VERSION\2|" Cargo.toml
+          grep -q "version = \"$NEW_VERSION\" }" Cargo.toml
 
           # Cargo.lock's erbridge and erbridge-core entries: update the version line right after the matching name line.
           awk -v ver="$NEW_VERSION" '
