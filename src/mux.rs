@@ -12,6 +12,7 @@ use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
 use futures::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc as tmpsc;
+use tokio_util::sync::CancellationToken;
 use yamux::{Connection, ConnectionError, Stream};
 
 pub use yamux::{Config as MuxConfig, Mode};
@@ -69,6 +70,19 @@ pub fn spawn<T>(socket: T, mode: Mode) -> (MuxControl, tmpsc::UnboundedReceiver<
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    spawn_with_shutdown(socket, mode, CancellationToken::new())
+}
+
+/// Like [`spawn`], but the driver also stops, dropping `socket`, once
+/// `shutdown` is cancelled.
+pub fn spawn_with_shutdown<T>(
+    socket: T,
+    mode: Mode,
+    shutdown: CancellationToken,
+) -> (MuxControl, tmpsc::UnboundedReceiver<Stream>)
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let (open_tx, mut open_rx) =
         mpsc::channel::<oneshot::Sender<Result<Stream, ConnectionError>>>(64);
     let (inbound_tx, inbound_rx) = tmpsc::unbounded_channel();
@@ -92,7 +106,9 @@ where
                 Stop,
             }
 
-            let action = poll_fn(|cx| {
+            let action = tokio::select! {
+                _ = shutdown.cancelled() => Action::Stop,
+                action = poll_fn(|cx| {
                 // Service one pending "open outbound stream" request, if any.
                 if pending.front().is_some()
                     && let Poll::Ready(result) = conn.poll_new_outbound(cx)
@@ -128,8 +144,8 @@ where
                 }
 
                 Poll::Pending
-            })
-            .await;
+                }) => action,
+            };
 
             match action {
                 Action::Continue => continue,

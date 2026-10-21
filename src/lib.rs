@@ -1,3 +1,4 @@
+#[cfg(feature = "cli")]
 pub mod cli;
 pub mod client;
 pub mod config;
@@ -8,4 +9,5 @@ pub mod proxy;
 pub mod reverse;
 pub mod stats;
 pub mod tls;
+#[cfg(feature = "cli")]
 pub mod tui;

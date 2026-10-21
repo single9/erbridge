@@ -5,6 +5,8 @@ use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::config::{ServeConfig, ServeTunnel};
 use crate::mux::{self, MuxControl};
@@ -18,6 +20,17 @@ use crate::stats::{Protocol, Registry};
 /// immediately and stay up across B reconnects; new external connections
 /// simply wait until a B session is active.
 pub async fn run_serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
+    run_serve_with_shutdown(cfg, registry, CancellationToken::new()).await
+}
+
+/// Like [`run_serve`], but returns `Ok(())` once `shutdown` is cancelled,
+/// after every listener, control session and tunnelled connection has been
+/// stopped and its socket dropped.
+pub async fn run_serve_with_shutdown(
+    cfg: ServeConfig,
+    registry: Registry,
+    shutdown: CancellationToken,
+) -> Result<()> {
     if cfg.tunnel.is_empty() {
         bail!("serve needs at least one [[serve.tunnel]] entry");
     }
@@ -30,10 +43,15 @@ pub async fn run_serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
     for tunnel in cfg.tunnel.clone() {
         let current_rx = current_rx.clone();
         let registry = registry.clone();
+        let shutdown = shutdown.clone();
         handles.push(tokio::spawn(async move {
-            if let Err(e) =
-                run_external_listener(tunnel.clone(), current_rx, registry.clone()).await
-            {
+            let listener = run_external_listener(
+                tunnel.clone(),
+                current_rx,
+                registry.clone(),
+                shutdown.clone(),
+            );
+            if let Some(Err(e)) = shutdown.run_until_cancelled(listener).await {
                 registry.error(format!(
                     "serve: external listener '{}' stopped: {e:#}",
                     tunnel.name
@@ -51,24 +69,34 @@ pub async fn run_serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
     ));
 
     handles.push(tokio::spawn(async move {
-        loop {
-            let (sock, peer) = match listener.accept().await {
-                Ok(v) => v,
-                Err(e) => {
-                    registry.error(format!("serve: accept failed: {e:#}"));
-                    continue;
-                }
-            };
-            let registry = registry.clone();
-            let current_tx = current_tx.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    handle_control_conn(sock, peer, psk, registry.clone(), current_tx).await
-                {
-                    registry.error(format!("serve: control connection {peer}: {e:#}"));
-                }
-            });
-        }
+        let accept_loop = async {
+            loop {
+                let (sock, peer) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        registry.error(format!("serve: accept failed: {e:#}"));
+                        continue;
+                    }
+                };
+                let registry = registry.clone();
+                let current_tx = current_tx.clone();
+                let shutdown = shutdown.clone();
+                tokio::spawn(async move {
+                    let conn = handle_control_conn(
+                        sock,
+                        peer,
+                        psk,
+                        registry.clone(),
+                        current_tx,
+                        shutdown.clone(),
+                    );
+                    if let Some(Err(e)) = shutdown.run_until_cancelled(conn).await {
+                        registry.error(format!("serve: control connection {peer}: {e:#}"));
+                    }
+                });
+            }
+        };
+        shutdown.run_until_cancelled(accept_loop).await;
     }));
 
     for handle in handles {
@@ -83,6 +111,7 @@ async fn handle_control_conn(
     psk: [u8; 32],
     registry: Registry,
     current_tx: watch::Sender<Option<MuxControl>>,
+    shutdown: CancellationToken,
 ) -> Result<()> {
     if current_tx.borrow().is_some() {
         bail!("rejecting {peer}: a tunnel client is already connected");
@@ -94,7 +123,8 @@ async fn handle_control_conn(
         .context("Noise handshake with tunnel client failed")?;
 
     registry.info(format!("serve: tunnel client connected from {peer}"));
-    let (control, mut inbound_rx) = mux::spawn(noise_stream.compat(), mux::Mode::Client);
+    let (control, mut inbound_rx) =
+        mux::spawn_with_shutdown(noise_stream.compat(), mux::Mode::Client, shutdown);
     let _ = current_tx.send(Some(control));
 
     // A never expects B to open streams back to it in this design; drain and
@@ -111,6 +141,7 @@ async fn run_external_listener(
     tunnel: ServeTunnel,
     current_rx: watch::Receiver<Option<MuxControl>>,
     registry: Registry,
+    shutdown: CancellationToken,
 ) -> Result<()> {
     let listener = TcpListener::bind(&tunnel.external)
         .await
@@ -125,11 +156,11 @@ async fn run_external_listener(
         let tunnel = tunnel.clone();
         let mut current_rx = current_rx.clone();
         let registry = registry.clone();
+        let shutdown = shutdown.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                handle_external_client(client, peer, tunnel.clone(), &mut current_rx, &registry)
-                    .await
-            {
+            let conn =
+                handle_external_client(client, peer, tunnel.clone(), &mut current_rx, &registry);
+            if let Some(Err(e)) = shutdown.run_until_cancelled(conn).await {
                 registry.error(format!("serve: tunnel '{}' {peer}: {e:#}", tunnel.name));
             }
         });
@@ -180,7 +211,7 @@ async fn handle_external_client(
     // gating this one would put a full A<->B round trip in front of every new
     // connection -- barely visible on loopback, and an entire link RTT on the
     // wide-area links this tunnel exists for.
-    let to_b = tokio::spawn(pump(client_r, mux_w, info.bytes_in.clone()));
+    let to_b = AbortOnDropHandle::new(tokio::spawn(pump(client_r, mux_w, info.bytes_in.clone())));
 
     // B answers with one byte once it has dialled the target (see the note in
     // `connect::handle_inbound_stream`). It is consumed here, before anything
@@ -208,7 +239,8 @@ async fn handle_external_client(
         return Err(e);
     }
 
-    let from_b = tokio::spawn(pump(mux_r, client_w, info.bytes_out.clone()));
+    let from_b =
+        AbortOnDropHandle::new(tokio::spawn(pump(mux_r, client_w, info.bytes_out.clone())));
     let (to_b, from_b) = tokio::join!(to_b, from_b);
     registry.close(&info);
     to_b.context("client -> B copy task")??;
