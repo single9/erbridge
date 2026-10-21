@@ -51,6 +51,7 @@ pub mod noise;
 #[doc(hidden)]
 pub mod proxy;
 pub mod reverse;
+pub mod sni;
 pub mod stats;
 pub mod tenant;
 #[doc(hidden)]
