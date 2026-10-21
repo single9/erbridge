@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+use tokio::sync::broadcast;
 
 pub type ConnId = u64;
 
@@ -47,7 +48,7 @@ impl ConnectionInfo {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
     ConnectionOpened {
@@ -113,6 +114,10 @@ struct JsonLogLine<'a> {
 
 const MAX_LOG_LINES: usize = 500;
 
+/// Events a slow subscriber may fall behind by before it starts losing the
+/// oldest ones.
+const EVENT_CHANNEL_CAPACITY: usize = 256;
+
 struct Inner {
     next_id: AtomicU64,
     total_bytes_in: AtomicU64,
@@ -121,6 +126,7 @@ struct Inner {
     live: Mutex<Vec<ConnectionInfo>>,
     log: Mutex<VecDeque<String>>,
     log_file: Mutex<Option<File>>,
+    events: broadcast::Sender<Event>,
 }
 
 /// Shared registry of live connections and recent events, read by the TUI and,
@@ -138,7 +144,16 @@ impl Registry {
             live: Mutex::new(Vec::new()),
             log: Mutex::new(VecDeque::with_capacity(MAX_LOG_LINES)),
             log_file: Mutex::new(None),
+            events: broadcast::channel(EVENT_CHANNEL_CAPACITY).0,
         }))
+    }
+
+    /// Subscribes to every event from now on, as structured values rather than
+    /// the formatted lines of [`Registry::recent_log`]. A subscriber that falls
+    /// more than a few hundred events behind gets `RecvError::Lagged` and
+    /// skips ahead.
+    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+        self.0.events.subscribe()
     }
 
     pub fn set_log_file(&self, path: PathBuf) -> anyhow::Result<()> {
@@ -223,6 +238,8 @@ impl Registry {
             }
             log.push_back(line);
         }
+        // `send` errs only when nobody is subscribed, which is fine.
+        let _ = self.0.events.send(event.clone());
         if let Some(file) = self.0.log_file.lock().unwrap().as_mut() {
             let ts_unix_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -277,4 +294,36 @@ pub struct Totals {
     pub total_connections: u64,
     pub bytes_in: u64,
     pub bytes_out: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscribers_receive_events_as_they_are_emitted() {
+        let registry = Registry::new();
+        let mut events = registry.subscribe();
+
+        registry.info("hello");
+        let conn = registry.open("web", Protocol::Tcp, "1.2.3.4:5", "B:web");
+        registry.close(&conn);
+
+        assert!(matches!(events.try_recv(), Ok(Event::Info { message }) if message == "hello"));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(Event::ConnectionOpened { .. })
+        ));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(Event::ConnectionClosed { .. })
+        ));
+    }
+
+    #[test]
+    fn events_without_subscribers_are_not_an_error() {
+        let registry = Registry::new();
+        registry.error("nobody is listening");
+        assert_eq!(registry.recent_log().len(), 1);
+    }
 }
