@@ -508,3 +508,98 @@ async fn a_corrupt_file_keeps_the_previous_tenants_until_it_is_fixed() {
     let _ = store;
     serve.shutdown.cancel();
 }
+
+fn limited(name: &str, token: &str, sni: &str, max_conns: usize) -> Tenant {
+    Tenant {
+        max_conns,
+        ..tenant(name, token, sni)
+    }
+}
+
+/// Opens a connection to `host` and waits for the first reply, so the relay is
+/// known to be established. `None` if the server closed it instead.
+async fn open_held(serve: &Serve, host: &str) -> Option<TcpStream> {
+    let mut conn = TcpStream::connect(serve.sni).await.unwrap();
+    conn.write_all(&common::client_hello(host)).await.unwrap();
+    let mut buf = [0u8; 4096];
+    match tokio::time::timeout(Duration::from_secs(2), conn.read(&mut buf)).await {
+        Ok(Ok(n)) if n > 0 => Some(conn),
+        _ => None,
+    }
+}
+
+/// `open_held`, retried while earlier probe connections finish closing and
+/// give their slots back.
+async fn open_held_when_free(serve: &Serve, host: &str) -> TcpStream {
+    for _ in 0..30 {
+        if let Some(conn) = open_held(serve, host).await {
+            return conn;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("no connection slot became free for {host}");
+}
+
+#[tokio::test]
+async fn connections_beyond_max_conns_are_closed_and_a_freed_slot_is_reusable() {
+    let (serve, _store) = start_serve_fast_reload(vec![
+        limited("ta", "token-a", "a.example.com", 2),
+        limited("tb", "token-b", "b.example.com", 2),
+    ])
+    .await;
+    let (addr_a, _) = target("A:").await;
+    let (addr_b, _) = target("B:").await;
+    let _a = spawn_connect(&serve, "token-a", &[("ta", addr_a)]);
+    let _b = spawn_connect(&serve, "token-b", &[("tb", addr_b)]);
+    wait_until_online(&serve, "a.example.com", "A:").await;
+    wait_until_online(&serve, "b.example.com", "B:").await;
+
+    let first = open_held_when_free(&serve, "a.example.com").await;
+    let _second = open_held_when_free(&serve, "a.example.com").await;
+    assert!(
+        open_held(&serve, "a.example.com").await.is_none(),
+        "third connection should be refused"
+    );
+
+    // Another tenant has its own budget.
+    assert!(open_held(&serve, "b.example.com").await.is_some());
+
+    // Freeing a slot makes room again.
+    drop(first);
+    let mut reused = None;
+    for _ in 0..30 {
+        reused = open_held(&serve, "a.example.com").await;
+        if reused.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(reused.is_some(), "slot was never freed");
+    serve.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_changed_limit_applies_to_new_connections_after_reload() {
+    let (serve, store) =
+        start_serve_fast_reload(vec![limited("ta", "token-a", "a.example.com", 1)]).await;
+    let (addr, _) = target("A:").await;
+    let _a = spawn_connect(&serve, "token-a", &[("ta", addr)]);
+    wait_until_online(&serve, "a.example.com", "A:").await;
+
+    let _held = open_held_when_free(&serve, "a.example.com").await;
+    assert!(open_held(&serve, "a.example.com").await.is_none());
+
+    store
+        .replace_with(&mut |set| {
+            set.without_tenant("ta")?
+                .with_tenant(limited("ta", "token-a", "a.example.com", 3))
+        })
+        .unwrap();
+    // Same name and PSK, so the session survives; give the reload a moment.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _one = open_held_when_free(&serve, "a.example.com").await;
+    let _two = open_held_when_free(&serve, "a.example.com").await;
+    let _three = open_held_when_free(&serve, "a.example.com").await;
+    assert!(open_held(&serve, "a.example.com").await.is_none());
+    serve.shutdown.cancel();
+}

@@ -21,7 +21,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tokio_util::sync::CancellationToken;
 
@@ -64,9 +64,31 @@ struct Hub {
     set: watch::Sender<Arc<TenantSet>>,
     sessions: Mutex<HashMap<String, Session>>,
     next_session: AtomicU64,
+    /// Per-tenant connection budgets, as (capacity, semaphore).
+    budgets: Mutex<HashMap<String, (usize, Arc<Semaphore>)>>,
 }
 
 impl Hub {
+    /// Takes one connection slot for `tenant`, or `None` if it is at its limit.
+    ///
+    /// A changed `max_conns` gets a fresh budget. Connections already open keep
+    /// holding slots of the old one, so during the switch a tenant can briefly
+    /// have a few more than either limit; that is the cost of not tracking
+    /// individual connections.
+    fn try_acquire(&self, tenant: &Tenant) -> Option<OwnedSemaphorePermit> {
+        let semaphore = {
+            let mut budgets = self.budgets.lock().unwrap();
+            let entry = budgets
+                .entry(tenant.name.clone())
+                .or_insert_with(|| (tenant.max_conns, Arc::new(Semaphore::new(tenant.max_conns))));
+            if entry.0 != tenant.max_conns {
+                *entry = (tenant.max_conns, Arc::new(Semaphore::new(tenant.max_conns)));
+            }
+            entry.1.clone()
+        };
+        semaphore.try_acquire_owned().ok()
+    }
+
     fn snapshot(&self) -> Arc<TenantSet> {
         self.set.borrow().clone()
     }
@@ -125,6 +147,7 @@ pub async fn run_tenant_serve_with_store(
         set: watch::channel(Arc::new(initial)).0,
         sessions: Mutex::new(HashMap::new()),
         next_session: AtomicU64::new(1),
+        budgets: Mutex::new(HashMap::new()),
     });
 
     let control_loop = accept_loop(control_listener, &shutdown, &registry, "control", {
@@ -285,6 +308,15 @@ async fn handle_sni(
         .map(|s| s.control.clone())
         .ok_or_else(|| anyhow!("tenant '{}' is offline", tenant.name))?;
 
+    // Held until the relay ends, which frees the slot.
+    let _slot = hub.try_acquire(&tenant).ok_or_else(|| {
+        anyhow!(
+            "tenant '{}' is at its limit of {} connections",
+            tenant.name,
+            tenant.max_conns
+        )
+    })?;
+
     relay(
         client,
         peer,
@@ -353,6 +385,11 @@ fn apply(hub: &Hub, next: TenantSet, registry: &Registry) {
         }
         still_valid
     });
+    drop(sessions);
+    hub.budgets
+        .lock()
+        .unwrap()
+        .retain(|name, _| next.tenant(name).is_some());
     registry.info(format!(
         "serve: reloaded tenants, {} now configured",
         next.tenants().len()
