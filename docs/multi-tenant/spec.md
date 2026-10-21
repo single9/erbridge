@@ -1,6 +1,6 @@
 # Multi-tenant `serve`
 
-Status: in progress. Tickets are in `issues/`, built in numeric order.
+Status: implemented (tickets 01-10). Tickets are in `issues/`, built in numeric order.
 
 Domain names, TLS certificates and payment are out of scope. erbridge treats a
 tenant's `sni` as an opaque host string and never terminates TLS: it reads the
@@ -64,8 +64,8 @@ routing, ACME, open self-registration without a code.
 ## Library readiness
 
 Done: the `erbridge-core` / `erbridge` workspace split,
-`run_serve_with_shutdown` / `run_connect_with_shutdown`, `Registry::subscribe`.
-Remaining: the socket-free tenant module behind `TenantStore` (ticket 01, 04).
+`run_serve_with_shutdown` / `run_connect_with_shutdown`, `Registry::subscribe`,
+the socket-free tenant module behind `TenantStore`.
 
 ## Release
 
