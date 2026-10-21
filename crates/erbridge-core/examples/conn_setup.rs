@@ -57,6 +57,7 @@ async fn main() {
             name: "w".into(),
             external: format!("127.0.0.1:{ep}"),
         }],
+        ..Default::default()
     };
     let connect_cfg = ConnectConfig {
         server: format!("127.0.0.1:{cp}"),

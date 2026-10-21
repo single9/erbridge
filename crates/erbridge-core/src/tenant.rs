@@ -7,8 +7,9 @@
 //! stored, never the token itself.
 
 use std::collections::HashSet;
+use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_MAX_CONNS: usize = 64;
@@ -156,6 +157,41 @@ fn check_entry(sni: &str, max_conns: usize, what: &str) -> Result<()> {
         bail!("{what} has max_conns = 0");
     }
     Ok(())
+}
+
+/// On-disk shape of the tenant file.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct TenantFile {
+    #[serde(default)]
+    tenant: Vec<Tenant>,
+    #[serde(default)]
+    code: Vec<EnrollCode>,
+}
+
+impl TenantSet {
+    pub fn from_toml(text: &str) -> Result<Self> {
+        let file: TenantFile = toml::from_str(text).context("parsing tenant file")?;
+        Self::new(file.tenant, file.code)
+    }
+
+    pub fn to_toml(&self) -> Result<String> {
+        let file = TenantFile {
+            tenant: self.tenants.clone(),
+            code: self.codes.clone(),
+        };
+        toml::to_string_pretty(&file).context("serialising tenant file")
+    }
+
+    /// Reads a tenant file. A missing file is an empty set, so a fresh
+    /// deployment can start `serve` before issuing anything.
+    pub fn load(path: &Path) -> Result<Self> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Self::from_toml(&text)
+                .with_context(|| format!("loading tenant file {}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+    }
 }
 
 /// Serde adapter storing a 32-byte PSK as 64 hex characters.

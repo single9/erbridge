@@ -1,6 +1,6 @@
 # 03: Multi-tenant serve with SNI routing
 
-**Status:** todo · **Crate:** erbridge-core · **Blocked by:** 01, 02
+**Status:** done · **Crate:** erbridge-core · **Blocked by:** 01, 02
 
 **What to build:** `ServeConfig` gains `tenants_file` and `sni_listen`;
 `run_serve_with_shutdown` runs the multi-tenant mode when `tenants_file` is set

@@ -129,6 +129,7 @@ fn resolve_serve(
         listen: String::new(),
         token: String::new(),
         tunnel: Vec::new(),
+        ..Default::default()
     });
     if let Some(l) = listen {
         cfg.listen = l;

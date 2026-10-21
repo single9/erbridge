@@ -28,6 +28,7 @@ async fn reverse_tunnel_roundtrip() {
             name: "web".into(),
             external: format!("127.0.0.1:{external_port}"),
         }],
+        ..Default::default()
     };
     let connect_cfg = ConnectConfig {
         server: format!("127.0.0.1:{control_port}"),
@@ -79,6 +80,7 @@ async fn multiple_streams_share_one_control_connection() {
             name: "web".into(),
             external: format!("127.0.0.1:{external_port}"),
         }],
+        ..Default::default()
     };
     let connect_cfg = ConnectConfig {
         server: format!("127.0.0.1:{control_port}"),
@@ -126,6 +128,7 @@ async fn rejects_mismatched_psk() {
             name: "web".into(),
             external: format!("127.0.0.1:{external_port}"),
         }],
+        ..Default::default()
     };
     let connect_cfg = ConnectConfig {
         server: format!("127.0.0.1:{control_port}"),
@@ -179,6 +182,7 @@ async fn carries_more_concurrent_connections_than_the_yamux_ack_backlog() {
             name: "web".into(),
             external: format!("127.0.0.1:{external_port}"),
         }],
+        ..Default::default()
     };
     let connect_cfg = ConnectConfig {
         server: format!("127.0.0.1:{control_port}"),
@@ -250,6 +254,7 @@ async fn closes_the_client_when_b_cannot_reach_the_target() {
             name: "web".into(),
             external: format!("127.0.0.1:{external_port}"),
         }],
+        ..Default::default()
     };
     let connect_cfg = ConnectConfig {
         server: format!("127.0.0.1:{control_port}"),
@@ -298,6 +303,7 @@ async fn shutdown_stops_both_roles_and_releases_ports() {
             name: "web".into(),
             external: format!("127.0.0.1:{external_port}"),
         }],
+        ..Default::default()
     };
     let connect_cfg = ConnectConfig {
         server: format!("127.0.0.1:{control_port}"),
