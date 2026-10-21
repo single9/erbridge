@@ -791,6 +791,7 @@ dependencies = [
  "crossterm",
  "erbridge-core",
  "ratatui",
+ "tempfile",
  "tokio",
 ]
 

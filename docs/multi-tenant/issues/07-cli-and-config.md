@@ -1,6 +1,6 @@
 # 07: CLI, config and docs
 
-**Status:** todo · **Crate:** erbridge · **Blocked by:** 06
+**Status:** done · **Crate:** erbridge · **Blocked by:** 06
 
 **What to build:**
 
