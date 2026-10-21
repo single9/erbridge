@@ -145,3 +145,60 @@ pub async fn run_tagged_echo_server(addr: SocketAddr, tag: &'static str, hits: A
         });
     }
 }
+
+/// A TLS server (self-signed) that answers each read with `tag` followed by the
+/// bytes read, so a test can tell which target a real TLS client reached.
+pub async fn run_tls_tagged_echo_server(addr: SocketAddr, tag: &'static str) {
+    erbridge_core::tls::install_crypto_provider();
+    let cert = erbridge_core::tls::generate_self_signed().unwrap();
+    let acceptor =
+        tokio_rustls::TlsAcceptor::from(erbridge_core::tls::server_tls_config(&cert).unwrap());
+    let listener = TcpListener::bind(addr).await.expect("bind tls echo");
+    loop {
+        let Ok((tcp, _)) = listener.accept().await else {
+            continue;
+        };
+        let acceptor = acceptor.clone();
+        tokio::spawn(async move {
+            let Ok(mut stream) = acceptor.accept(tcp).await else {
+                return;
+            };
+            let mut buf = vec![0u8; 8192];
+            loop {
+                match stream.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let mut reply = tag.as_bytes().to_vec();
+                        reply.extend_from_slice(&buf[..n]);
+                        if stream.write_all(&reply).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// A TLS client for `sni` (connecting to `addr`) that completes the handshake
+/// and returns the first reply to `payload`. Any failure is an `Err`, so a test
+/// can assert that a connection is refused.
+pub async fn tls_exchange(addr: SocketAddr, sni: &str, payload: &[u8]) -> std::io::Result<Vec<u8>> {
+    use std::io::{Error, ErrorKind};
+    erbridge_core::tls::install_crypto_provider();
+    let attempt = async {
+        let connector = TlsConnector::from(erbridge_core::tls::client_tls_config().unwrap());
+        let tcp = tokio::net::TcpStream::connect(addr).await?;
+        let name = rustls_pki_types::ServerName::try_from(sni.to_string())
+            .map_err(|e| Error::new(ErrorKind::InvalidInput, e))?;
+        let mut stream = connector.connect(name, tcp).await?;
+        stream.write_all(payload).await?;
+        let mut buf = vec![0u8; 8192];
+        let n = stream.read(&mut buf).await?;
+        buf.truncate(n);
+        Ok(buf)
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(3), attempt)
+        .await
+        .map_err(|_| Error::new(ErrorKind::TimedOut, "tls exchange timed out"))?
+}

@@ -791,8 +791,10 @@ dependencies = [
  "crossterm",
  "erbridge-core",
  "ratatui",
+ "rustls-pki-types",
  "tempfile",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
