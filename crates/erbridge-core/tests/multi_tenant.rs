@@ -724,3 +724,163 @@ async fn many_enrollments_get_distinct_names_and_tokens() {
     assert_eq!(store.snapshot().unwrap().tenants().len(), 15);
     serve.shutdown.cancel();
 }
+
+// ---- end to end with real TLS clients and servers ----
+
+async fn tls_target(tag: &'static str) -> SocketAddr {
+    let addr: SocketAddr = format!("127.0.0.1:{}", common::free_port())
+        .parse()
+        .unwrap();
+    tokio::spawn(common::run_tls_tagged_echo_server(addr, tag));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    addr
+}
+
+/// Retries a TLS exchange until the tenant is reachable.
+async fn tls_when_online(serve: &Serve, sni: &str, payload: &[u8]) -> Vec<u8> {
+    for _ in 0..50 {
+        if let Ok(reply) = common::tls_exchange(serve.sni, sni, payload).await {
+            return reply;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("no TLS reply from {sni}");
+}
+
+#[tokio::test]
+async fn real_tls_clients_reach_their_own_tls_targets() {
+    let serve = start_serve(vec![
+        tenant("ta", "token-a", "a.example.com"),
+        tenant("tb", "token-b", "b.example.com"),
+    ])
+    .await;
+    let (addr_a, addr_b) = (tls_target("A:").await, tls_target("B:").await);
+    let _a = spawn_connect(&serve, "token-a", &[("ta", addr_a)]);
+    let _b = spawn_connect(&serve, "token-b", &[("tb", addr_b)]);
+
+    assert_eq!(
+        tls_when_online(&serve, "a.example.com", b"hi").await,
+        b"A:hi"
+    );
+    assert_eq!(
+        tls_when_online(&serve, "b.example.com", b"yo").await,
+        b"B:yo"
+    );
+    // A host nobody owns fails the handshake rather than reaching anyone.
+    assert!(
+        common::tls_exchange(serve.sni, "c.example.com", b"x")
+            .await
+            .is_err()
+    );
+    serve.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn enroll_connect_revoke_and_enroll_again() {
+    let (serve, store) = start_serve_fast_reload(vec![]).await;
+    let target = tls_target("T:").await;
+
+    let (code, entry) = new_enroll_code("life.example.com", 4, None);
+    issue_and_settle(&store, entry).await;
+    let creds = enroll_now(&serve, &code).await.unwrap();
+    let first = spawn_connect(&serve, &creds.token, &[(&creds.name, target)]);
+    assert_eq!(
+        tls_when_online(&serve, "life.example.com", b"1").await,
+        b"T:1"
+    );
+
+    store.revoke(&creds.name).unwrap();
+    first.cancel();
+    wait_until_offline(&serve, "life.example.com").await;
+    assert!(
+        common::tls_exchange(serve.sni, "life.example.com", b"2")
+            .await
+            .is_err()
+    );
+    // The old token is dead for good, once serve has reloaded.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut sock = TcpStream::connect(&serve.control).await.unwrap();
+    assert!(
+        noise::connect(&mut sock, &noise::derive_psk(&creds.token))
+            .await
+            .is_err()
+    );
+
+    // The host is free again: a new code gives a new tenant on the same host.
+    let (code2, entry2) = new_enroll_code("life.example.com", 4, None);
+    issue_and_settle(&store, entry2).await;
+    let creds2 = enroll_now(&serve, &code2).await.unwrap();
+    assert_ne!(creds2.name, creds.name);
+    assert_ne!(creds2.token, creds.token);
+    let _second = spawn_connect(&serve, &creds2.token, &[(&creds2.name, target)]);
+    assert_eq!(
+        tls_when_online(&serve, "life.example.com", b"3").await,
+        b"T:3"
+    );
+    serve.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn restarting_a_connect_resumes_service() {
+    let serve = start_serve(vec![tenant("ta", "token-a", "a.example.com")]).await;
+    let target = tls_target("A:").await;
+
+    let first = spawn_connect(&serve, "token-a", &[("ta", target)]);
+    assert_eq!(tls_when_online(&serve, "a.example.com", b"1").await, b"A:1");
+    first.cancel();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let _second = spawn_connect(&serve, "token-a", &[("ta", target)]);
+    assert_eq!(tls_when_online(&serve, "a.example.com", b"2").await, b"A:2");
+    serve.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn the_connection_limit_holds_for_real_tls_clients() {
+    let (serve, _store) =
+        start_serve_fast_reload(vec![limited("ta", "token-a", "a.example.com", 1)]).await;
+    let target = tls_target("A:").await;
+    let _a = spawn_connect(&serve, "token-a", &[("ta", target)]);
+    tls_when_online(&serve, "a.example.com", b"warm up").await;
+
+    // Hold the single slot with an open TLS connection.
+    erbridge_core::tls::install_crypto_provider();
+    let connector =
+        tokio_rustls::TlsConnector::from(erbridge_core::tls::client_tls_config().unwrap());
+    let mut held = None;
+    for _ in 0..30 {
+        let tcp = TcpStream::connect(serve.sni).await.unwrap();
+        let name = rustls_pki_types::ServerName::try_from("a.example.com").unwrap();
+        if let Ok(stream) = connector.connect(name, tcp).await {
+            held = Some(stream);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let mut held = held.expect("could not take the only slot");
+    held.write_all(b"x").await.unwrap();
+    let mut buf = [0u8; 16];
+    assert!(held.read(&mut buf).await.unwrap() > 0);
+
+    assert!(
+        common::tls_exchange(serve.sni, "a.example.com", b"second")
+            .await
+            .is_err(),
+        "a second TLS client should be refused while the slot is held"
+    );
+
+    drop(held);
+    let mut ok = false;
+    for _ in 0..30 {
+        if common::tls_exchange(serve.sni, "a.example.com", b"again")
+            .await
+            .is_ok()
+        {
+            ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(ok, "slot never freed");
+    serve.shutdown.cancel();
+}
