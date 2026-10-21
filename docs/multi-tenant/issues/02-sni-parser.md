@@ -1,6 +1,6 @@
 # 02: SNI parser
 
-**Status:** todo · **Crate:** erbridge-core · **Blocked by:** none
+**Status:** done · **Crate:** erbridge-core · **Blocked by:** none
 
 **What to build:** `sni` module that reads the first TLS record from a stream
 (cap 16 KiB, 5 s timeout) and extracts the SNI, returning it with the buffered
