@@ -69,6 +69,14 @@ token = "change-me"          # shared secret B must provide
 name = "web"
 external = "0.0.0.0:8081"
 
+# ---- serve, multi-tenant mode: many connect clients, each with its own token and host ----
+# Replaces `token` and [[serve.tunnel]] above (mixing them is an error). Manage the tenant file
+# with `erbridge serve-admin`; serve re-reads it every second.
+# [serve]
+# listen = "0.0.0.0:9000"          # control port tunnel clients connect to
+# tenants_file = "tenants.toml"
+# sni_listen = "0.0.0.0:443"       # accepts TLS and routes by SNI (never decrypts)
+
 # ---- connect: role B, connects to A ----
 [connect]
 server = "1.2.3.4:9000"      # A's control address
@@ -78,3 +86,5 @@ reconnect_max_secs = 30      # max interval for reconnect retries (exponential b
 [[connect.tunnel]]
 name = "web"                 # must match the tunnel name on serve's side
 target = "127.0.0.1:80"      # final target on B's local machine (or internal network B can reach)
+# Against a multi-tenant serve, `erbridge enroll` gives you the token and the tunnel name (the
+# tenant name) to use here, or pass `--credentials FILE --target ADDR` to `connect` instead.

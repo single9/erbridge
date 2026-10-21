@@ -273,6 +273,42 @@ Both sides use the same `NAME` in `--tunnel NAME=...` to correspond to the same 
 
 After B disconnects, A's external listening port does not close; new connections wait for B to reconnect. B automatically retries connecting back to A with exponential backoff (`reconnect_min_secs` ~ `reconnect_max_secs`).
 
+### Multi-tenant serve: many clients, one server
+
+A single `serve` can host many independent users, each with their own secret and their own
+hostname. Clients are told apart by which token they hold, and TLS visitors are routed by the
+SNI in their ClientHello. `serve` never decrypts the TLS traffic; it relays the bytes.
+
+```sh
+# On the server. The tenant file starts empty (or missing).
+erbridge serve --listen 0.0.0.0:9000 --tenants tenants.toml --sni-listen 0.0.0.0:443
+
+# Hand a user a single-use code for a hostname (works while serve is running):
+erbridge serve-admin --tenants tenants.toml issue --sni abc123.example.com --expires-in 86400
+
+# On the user's machine: trade the code for credentials, then connect.
+erbridge enroll --server A_IP:9000 --code <CODE> --out credentials.toml
+erbridge connect --server A_IP:9000 --credentials credentials.toml --target 127.0.0.1:8080
+```
+
+`serve-admin` also has `list`, `disable NAME`, `enable NAME` and `revoke NAME`. Revoking or
+disabling a tenant ends its session and leaves everyone else's untouched.
+
+- A code works once and may expire. It is stored only as a hash, and a newly issued code is
+  usable within a second (the file is re-read every second).
+- Enrolling creates the tenant with a server-chosen name and a random token. The token is shown
+  once, in `credentials.toml` (mode 0600, never overwritten).
+- A tenant's tunnel name is decided by `serve`, so a client cannot steer traffic at someone
+  else's target. A wrong token and an unknown tenant look identical: the connection closes.
+- `max_conns` (default 64) caps a tenant's concurrent connections; extra ones are closed.
+- Unknown hosts, missing SNI, non-TLS bytes and tenants that are offline get a closed
+  connection and no reply. The ClientHello must fit in one TLS record, which every mainstream
+  client satisfies.
+- `serve --tenants` cannot be combined with `--token` or `--tunnel`.
+
+Embedders use `run_tenant_serve_with_store` with their own `TenantStore` to keep tenants
+somewhere other than a file.
+
 ## Observing traffic
 
 By default an interactive TUI (ratatui) opens, showing aggregate traffic, a per-connection list (source/destination/protocol/bytes/lifetime), and an event log; it is read-only and cannot control connections. Press `q` / `Esc` / `Ctrl+C` to exit.

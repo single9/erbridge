@@ -74,6 +74,15 @@ pub enum Command {
         /// Ad-hoc tunnel, repeatable: NAME=EXTERNAL_ADDR.
         #[arg(long = "tunnel", value_name = "NAME=EXTERNAL_ADDR")]
         tunnels: Vec<String>,
+        /// Multi-tenant mode: the tenant file (see `serve-admin`). Each tenant
+        /// has its own token and is reached by its own TLS SNI host. Replaces
+        /// --token and --tunnel; needs --sni-listen.
+        #[arg(long, value_name = "FILE")]
+        tenants: Option<PathBuf>,
+        /// Multi-tenant mode: address that accepts TLS connections and routes
+        /// them to tenants by SNI, e.g. 0.0.0.0:443.
+        #[arg(long, value_name = "ADDR")]
+        sni_listen: Option<String>,
     },
 
     /// Reverse tunnel role B: dial `serve` (A) and relay each stream it
@@ -88,5 +97,170 @@ pub enum Command {
         /// Ad-hoc tunnel, repeatable: NAME=TARGET_ADDR.
         #[arg(long = "tunnel", value_name = "NAME=TARGET_ADDR")]
         tunnels: Vec<String>,
+        /// Credentials file written by `enroll`: supplies the token and the
+        /// tunnel name, so only --target is needed besides --server.
+        #[arg(long, value_name = "FILE")]
+        credentials: Option<PathBuf>,
+        /// Local target for the tunnel named in --credentials.
+        #[arg(long, value_name = "ADDR", requires = "credentials")]
+        target: Option<String>,
     },
+
+    /// Trade a single-use enrollment code for the credentials of a new tenant
+    /// on a multi-tenant `serve`.
+    Enroll {
+        /// The server's control address, e.g. relay.example.com:9000.
+        #[arg(long)]
+        server: String,
+        /// The code from `serve-admin issue`.
+        #[arg(long)]
+        code: String,
+        /// Write the credentials here (mode 0600, never overwrites) instead of
+        /// printing them.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
+
+    /// Manage the tenant file of a multi-tenant `serve`. Safe to run while
+    /// `serve` is up; changes apply within a second.
+    ServeAdmin {
+        /// The tenant file (or set `serve.tenants_file` in the config).
+        #[arg(long, value_name = "FILE", global = true)]
+        tenants: Option<PathBuf>,
+        #[command(subcommand)]
+        action: AdminAction,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum AdminAction {
+    /// Print a new single-use enrollment code for a host.
+    Issue {
+        /// The TLS SNI host the new tenant will be reached at.
+        #[arg(long)]
+        sni: String,
+        /// Concurrent connections the tenant may have (default 64).
+        #[arg(long)]
+        max_conns: Option<usize>,
+        /// Seconds until the code stops working (default: never).
+        #[arg(long, value_name = "SECS")]
+        expires_in: Option<u64>,
+    },
+    /// Remove a tenant; its token stops working and its session ends.
+    Revoke { name: String },
+    /// Suspend a tenant without forgetting it.
+    Disable { name: String },
+    /// Resume a suspended tenant.
+    Enable { name: String },
+    /// List tenants and the number of unused codes.
+    List,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("erbridge").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn serve_accepts_the_multi_tenant_flags() {
+        let cli = parse(&[
+            "serve",
+            "--listen",
+            "0.0.0.0:9000",
+            "--tenants",
+            "t.toml",
+            "--sni-listen",
+            "0.0.0.0:443",
+        ])
+        .unwrap();
+        let Command::Serve {
+            tenants,
+            sni_listen,
+            token,
+            ..
+        } = cli.command
+        else {
+            panic!("not serve");
+        };
+        assert_eq!(tenants.unwrap().to_str(), Some("t.toml"));
+        assert_eq!(sni_listen.as_deref(), Some("0.0.0.0:443"));
+        assert!(token.is_none());
+    }
+
+    #[test]
+    fn connect_takes_credentials_and_a_target() {
+        let cli = parse(&[
+            "connect",
+            "--server",
+            "h:9000",
+            "--credentials",
+            "c.toml",
+            "--target",
+            "127.0.0.1:80",
+        ])
+        .unwrap();
+        let Command::Connect {
+            credentials,
+            target,
+            ..
+        } = cli.command
+        else {
+            panic!("not connect");
+        };
+        assert_eq!(credentials.unwrap().to_str(), Some("c.toml"));
+        assert_eq!(target.as_deref(), Some("127.0.0.1:80"));
+        // --target alone makes no sense.
+        assert!(parse(&["connect", "--server", "h:1", "--target", "x:1"]).is_err());
+    }
+
+    #[test]
+    fn enroll_needs_a_server_and_a_code() {
+        assert!(parse(&["enroll", "--server", "h:9000", "--code", "abc"]).is_ok());
+        assert!(parse(&["enroll", "--server", "h:9000"]).is_err());
+        assert!(parse(&["enroll", "--code", "abc"]).is_err());
+    }
+
+    #[test]
+    fn serve_admin_subcommands_parse() {
+        let cli = parse(&[
+            "serve-admin",
+            "--tenants",
+            "t.toml",
+            "issue",
+            "--sni",
+            "a.example.com",
+            "--max-conns",
+            "5",
+            "--expires-in",
+            "3600",
+        ])
+        .unwrap();
+        let Command::ServeAdmin { tenants, action } = cli.command else {
+            panic!("not serve-admin");
+        };
+        assert_eq!(tenants.unwrap().to_str(), Some("t.toml"));
+        assert!(matches!(
+            action,
+            AdminAction::Issue {
+                max_conns: Some(5),
+                expires_in: Some(3600),
+                ..
+            }
+        ));
+        for ok in [
+            &["serve-admin", "revoke", "t-1"][..],
+            &["serve-admin", "disable", "t-1"],
+            &["serve-admin", "enable", "t-1"],
+            &["serve-admin", "list"],
+        ] {
+            assert!(parse(ok).is_ok(), "{ok:?}");
+        }
+        assert!(
+            parse(&["serve-admin", "issue"]).is_err(),
+            "issue needs --sni"
+        );
+    }
 }

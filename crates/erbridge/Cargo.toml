@@ -13,3 +13,6 @@ crossterm = "0.29.0"
 erbridge-core = { path = "../erbridge-core" }
 ratatui = "0.30.2"
 tokio = { version = "1.53.1", features = ["full"] }
+
+[dev-dependencies]
+tempfile = "3"
