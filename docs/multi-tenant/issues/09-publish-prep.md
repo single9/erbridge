@@ -1,6 +1,6 @@
 # 09: crates.io publish preparation
 
-**Status:** todo · **Blocked by:** 07
+**Status:** done · **Blocked by:** 07
 
 **What to build:** metadata and layout so both crates pass `cargo publish
 --dry-run`.
@@ -14,6 +14,6 @@
 ## Acceptance
 
 - `cargo publish --dry-run -p erbridge-core` passes.
-- `cargo package -p erbridge --list` shows only intended files; `erbridge`
-  verifies against a local registry or `--no-verify` documented until core exists
-  upstream.
+- `cargo publish --workspace --dry-run` passes: it packages both crates and
+  verifies `erbridge` against the not-yet-published `erbridge-core` through a
+  local overlay registry, so no `--no-verify` is needed.

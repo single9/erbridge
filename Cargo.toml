@@ -7,6 +7,16 @@ version = "0.2.0"
 edition = "2024"
 authors = ["Duye Chen <k078264@gmail.com>"]
 license = "MIT"
+repository = "https://github.com/single9/erbridge"
+homepage = "https://github.com/single9/erbridge"
+# `File::lock` (tenant file locking) needs 1.89.
+rust-version = "1.89"
+
+# The version here is bumped together with `[workspace.package]` by the release
+# workflow; the two must stay equal for `cargo publish` to resolve the path
+# dependency against crates.io.
+[workspace.dependencies]
+erbridge-core = { path = "crates/erbridge-core", version = "0.2.0" }
 
 [profile.release]
 lto = "thin"

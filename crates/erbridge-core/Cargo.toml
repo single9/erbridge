@@ -1,10 +1,16 @@
 [package]
 name = "erbridge-core"
-description = "TCP/UDP forwarding and reverse tunnels, as a library"
+description = "TCP/UDP forwarding and reverse tunnels over Noise, with a multi-tenant SNI-routed server, as a library"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["tunnel", "port-forwarding", "reverse-tunnel", "noise-protocol", "sni"]
+categories = ["network-programming", "asynchronous"]
 
 [dependencies]
 anyhow = "1.0.104"
