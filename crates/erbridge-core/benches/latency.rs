@@ -135,6 +135,7 @@ fn bench_reverse(c: &mut Criterion, rt: &Runtime) {
             name: "web".into(),
             external: format!("127.0.0.1:{external_port}"),
         }],
+        ..Default::default()
     };
     let connect_cfg = ConnectConfig {
         server: format!("127.0.0.1:{control_port}"),

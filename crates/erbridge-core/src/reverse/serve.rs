@@ -1,7 +1,9 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result, bail};
-use tokio::io::AsyncReadExt;
+use std::sync::atomic::Ordering;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
@@ -31,6 +33,9 @@ pub async fn run_serve_with_shutdown(
     registry: Registry,
     shutdown: CancellationToken,
 ) -> Result<()> {
+    if cfg.is_multi_tenant()? {
+        return crate::reverse::tenant_serve::run_tenant_serve(cfg, registry, shutdown).await;
+    }
     if cfg.tunnel.is_empty() {
         bail!("serve needs at least one [[serve.tunnel]] entry");
     }
@@ -174,8 +179,6 @@ async fn handle_external_client(
     current_rx: &mut watch::Receiver<Option<MuxControl>>,
     registry: &Registry,
 ) -> Result<()> {
-    let _ = client.set_nodelay(true);
-
     let control = loop {
         if let Some(c) = current_rx.borrow().clone() {
             break c;
@@ -185,33 +188,56 @@ async fn handle_external_client(
             .await
             .context("tunnel client control channel closed")?;
     };
+    relay(client, peer, &control, &tunnel.name, &[], registry).await
+}
+
+/// Relays one external connection through a tunnel session: opens a stream,
+/// names the tunnel for B, replays `prefix` (bytes already read from `client`),
+/// then pipes both directions until either side finishes.
+pub(crate) async fn relay(
+    client: TcpStream,
+    peer: SocketAddr,
+    control: &MuxControl,
+    tunnel_name: &str,
+    prefix: &[u8],
+    registry: &Registry,
+) -> Result<()> {
+    let _ = client.set_nodelay(true);
 
     let stream = control
         .open_stream()
         .await
         .context("opening mux stream to tunnel client")?;
     let mut compat = stream.compat();
-    write_frame(&mut compat, tunnel.name.as_bytes())
+    write_frame(&mut compat, tunnel_name.as_bytes())
         .await
         .context("sending tunnel header")?;
 
-    let label = format!("reverse:{}", tunnel.name);
+    let label = format!("reverse:{tunnel_name}");
     let info = registry.open(
         label,
         Protocol::Tcp,
         peer.to_string(),
-        format!("B:{}", tunnel.name),
+        format!("B:{tunnel_name}"),
     );
 
     let (client_r, client_w) = tokio::io::split(client);
-    let (mut mux_r, mux_w) = tokio::io::split(compat);
+    let (mut mux_r, mut mux_w) = tokio::io::split(compat);
 
     // Start forwarding the client's request straight away instead of waiting
     // for B's reply first. The two directions are otherwise symmetric, but
     // gating this one would put a full A<->B round trip in front of every new
     // connection -- barely visible on loopback, and an entire link RTT on the
     // wide-area links this tunnel exists for.
-    let to_b = AbortOnDropHandle::new(tokio::spawn(pump(client_r, mux_w, info.bytes_in.clone())));
+    let bytes_in = info.bytes_in.clone();
+    let prefix = prefix.to_vec();
+    let to_b = AbortOnDropHandle::new(tokio::spawn(async move {
+        if !prefix.is_empty() {
+            mux_w.write_all(&prefix).await?;
+            bytes_in.fetch_add(prefix.len() as u64, Ordering::Relaxed);
+        }
+        pump(client_r, mux_w, bytes_in).await
+    }));
 
     // B answers with one byte once it has dialled the target (see the note in
     // `connect::handle_inbound_stream`). It is consumed here, before anything
@@ -224,7 +250,7 @@ async fn handle_external_client(
             .await
             .context("waiting for B to open the target connection")?;
         if ready[0] != 1 {
-            bail!("B could not reach the target for tunnel '{}'", tunnel.name);
+            bail!("B could not reach the target for tunnel '{tunnel_name}'");
         }
         Ok::<(), anyhow::Error>(())
     }

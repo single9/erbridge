@@ -26,6 +26,7 @@
 
 pub mod connect;
 pub mod serve;
+pub mod tenant_serve;
 
 use std::io;
 

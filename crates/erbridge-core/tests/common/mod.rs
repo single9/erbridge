@@ -104,3 +104,44 @@ pub async fn run_silent_tcp_server(addr: SocketAddr, accepted: Arc<AtomicUsize>)
         held.push(stream);
     }
 }
+
+/// The TLS ClientHello a real rustls client would send for `name`. Enough to
+/// exercise SNI routing without completing a handshake.
+pub fn client_hello(name: &str) -> Vec<u8> {
+    use rustls_pki_types::ServerName;
+    erbridge_core::tls::install_crypto_provider();
+    let config = erbridge_core::tls::client_tls_config().unwrap();
+    let server_name = ServerName::try_from(name.to_string()).unwrap();
+    let mut conn = rustls::ClientConnection::new(config, server_name).unwrap();
+    let mut out = Vec::new();
+    conn.write_tls(&mut out).unwrap();
+    out
+}
+
+/// Accepts TCP connections forever; for each, answers every read with `tag`
+/// followed by the bytes read, so a test can tell which target it reached.
+/// Counts accepted connections in `hits`.
+pub async fn run_tagged_echo_server(addr: SocketAddr, tag: &'static str, hits: Arc<AtomicUsize>) {
+    let listener = TcpListener::bind(addr).await.expect("bind tagged echo");
+    loop {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            continue;
+        };
+        hits.fetch_add(1, Ordering::SeqCst);
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 8192];
+            loop {
+                match stream.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let mut reply = tag.as_bytes().to_vec();
+                        reply.extend_from_slice(&buf[..n]);
+                        if stream.write_all(&reply).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+}

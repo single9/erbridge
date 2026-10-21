@@ -92,13 +92,46 @@ pub struct ServeTunnel {
     pub external: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct ServeConfig {
     /// Control address A listens on, waiting for B (`connect`) to dial in.
     pub listen: String,
+    /// Shared secret for the single-tenant mode. Must be empty when
+    /// `tenants_file` is set.
+    #[serde(default)]
     pub token: String,
     #[serde(default)]
     pub tunnel: Vec<ServeTunnel>,
+    /// Multi-tenant mode: path of the tenant file. Each tenant has its own
+    /// token and is reached by its own SNI host.
+    #[serde(default)]
+    pub tenants_file: Option<String>,
+    /// Multi-tenant mode: address that accepts TLS connections and routes them
+    /// by SNI. Required with `tenants_file`, rejected without it.
+    #[serde(default)]
+    pub sni_listen: Option<String>,
+}
+
+impl ServeConfig {
+    /// Whether this is the multi-tenant mode, after checking that the options
+    /// of the two modes are not mixed.
+    pub fn is_multi_tenant(&self) -> Result<bool> {
+        match (&self.tenants_file, &self.sni_listen) {
+            (Some(_), sni) => {
+                if !self.token.is_empty() || !self.tunnel.is_empty() {
+                    bail!(
+                        "serve: `tenants_file` cannot be combined with `token` or `[[serve.tunnel]]`"
+                    );
+                }
+                if sni.is_none() {
+                    bail!("serve: `tenants_file` requires `sni_listen`");
+                }
+                Ok(true)
+            }
+            (None, Some(_)) => bail!("serve: `sni_listen` requires `tenants_file`"),
+            (None, None) => Ok(false),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
