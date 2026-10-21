@@ -1,6 +1,6 @@
 # 01: Tenant model and PSK identification
 
-**Status:** todo · **Crate:** erbridge-core · **Blocked by:** none
+**Status:** done · **Crate:** erbridge-core · **Blocked by:** none
 
 **What to build:** socket-free tenant types and the handshake that picks a
 tenant by trying each PSK.

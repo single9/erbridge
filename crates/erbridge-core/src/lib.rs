@@ -52,5 +52,6 @@ pub mod noise;
 pub mod proxy;
 pub mod reverse;
 pub mod stats;
+pub mod tenant;
 #[doc(hidden)]
 pub mod tls;

@@ -23,7 +23,7 @@ use std::task::{Context, Poll};
 
 use anyhow::{Context as _, Result};
 use sha2::{Digest, Sha256};
-use snow::{Builder, TransportState};
+use snow::{Builder, HandshakeState, TransportState};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::reverse::{read_frame, write_frame};
@@ -83,23 +83,44 @@ where
 /// Runs the responder side of the handshake over `io` and returns a
 /// transport-mode stream. Used by `serve` (accepting `connect`) and `forward`
 /// (accepting a client on a `transport = "noise"` mapping).
-pub async fn accept<T>(mut io: T, psk: &[u8; 32]) -> Result<NoiseStream<T>>
+pub async fn accept<T>(io: T, psk: &[u8; 32]) -> Result<NoiseStream<T>>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    let params = NOISE_PATTERN.parse().expect("valid static Noise params");
-    let mut hs = Builder::new(params)
-        .psk(0, psk)
-        .context("configuring Noise PSK")?
-        .build_responder()
-        .context("building Noise responder")?;
+    let (stream, _) = accept_any(io, std::slice::from_ref(psk)).await?;
+    Ok(stream)
+}
 
-    let mut buf = vec![0u8; MAX_MESSAGE];
+/// Like [`accept`], but for a responder that does not know in advance which of
+/// several PSKs the initiator holds. Reads handshake message 1 once, then tries
+/// each candidate on a fresh responder; the one whose AEAD tag verifies wins and
+/// its index is returned alongside the stream.
+///
+/// Every candidate is tried even after a match, so the time taken does not
+/// reveal the matching position. On no match the connection is dropped without
+/// a reply, exactly as for a single wrong PSK.
+pub async fn accept_any<T>(mut io: T, psks: &[[u8; 32]]) -> Result<(NoiseStream<T>, usize)>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
     let msg = read_frame(&mut io, MAX_MESSAGE)
         .await
         .context("reading Noise handshake message 1")?;
-    hs.read_message(&msg, &mut buf)
-        .context("processing Noise handshake message 1")?;
+
+    let mut buf = vec![0u8; MAX_MESSAGE];
+    let mut matched: Option<(usize, HandshakeState)> = None;
+    for (index, psk) in psks.iter().enumerate() {
+        let params = NOISE_PATTERN.parse().expect("valid static Noise params");
+        let mut hs = Builder::new(params)
+            .psk(0, psk)
+            .context("configuring Noise PSK")?
+            .build_responder()
+            .context("building Noise responder")?;
+        if hs.read_message(&msg, &mut buf).is_ok() && matched.is_none() {
+            matched = Some((index, hs));
+        }
+    }
+    let (index, mut hs) = matched.context("processing Noise handshake message 1")?;
 
     let len = hs
         .write_message(&[], &mut buf)
@@ -111,7 +132,7 @@ where
     let transport = hs
         .into_transport_mode()
         .context("entering Noise transport mode")?;
-    Ok(NoiseStream::new(io, transport))
+    Ok((NoiseStream::new(io, transport), index))
 }
 
 /// Accumulates an incoming length-prefixed ciphertext frame across however
@@ -406,6 +427,62 @@ mod tests {
         let mut buf = [0u8; 10];
         initiator.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"hello back");
+    }
+
+    #[tokio::test]
+    async fn accept_any_identifies_which_psk_matched() {
+        let psks = [derive_psk("one"), derive_psk("two"), derive_psk("three")];
+        for (expected, token) in ["one", "two", "three"].iter().enumerate() {
+            let (a, b) = tokio::io::duplex(4096);
+            let client_psk = derive_psk(token);
+            let ((mut initiator, _), (mut responder, index)) = tokio::try_join!(
+                async { Ok::<_, anyhow::Error>((connect(a, &client_psk).await?, ())) },
+                async { accept_any(b, &psks).await.map(|r| (r.0, r.1)) },
+            )
+            .unwrap();
+            assert_eq!(index, expected);
+
+            initiator.write_all(b"ping").await.unwrap();
+            let mut buf = [0u8; 4];
+            responder.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"ping");
+        }
+    }
+
+    #[tokio::test]
+    async fn accept_any_with_no_match_fails_and_writes_nothing() {
+        let (mut a, b) = tokio::io::duplex(4096);
+        let psks = [derive_psk("one"), derive_psk("two")];
+        let wrong = derive_psk("nope");
+
+        // Drive the initiator's first message by hand so the socket can be
+        // inspected afterwards.
+        let params = NOISE_PATTERN.parse().unwrap();
+        let mut hs = Builder::new(params)
+            .psk(0, &wrong)
+            .unwrap()
+            .build_initiator()
+            .unwrap();
+        let mut buf = vec![0u8; MAX_MESSAGE];
+        let len = hs.write_message(&[], &mut buf).unwrap();
+        write_frame(&mut a, &buf[..len]).await.unwrap();
+
+        assert!(accept_any(b, &psks).await.is_err());
+
+        // `b` was consumed and dropped by the failed accept; the peer must see
+        // a plain close, not a reply frame.
+        let mut rest = Vec::new();
+        a.read_to_end(&mut rest).await.unwrap();
+        assert!(rest.is_empty(), "server replied to an unknown PSK");
+    }
+
+    #[tokio::test]
+    async fn accept_any_with_empty_candidates_fails() {
+        let (a, b) = tokio::io::duplex(4096);
+        let psk = derive_psk("x");
+        let (client, server) = tokio::join!(connect(a, &psk), accept_any(b, &[]));
+        assert!(server.is_err());
+        assert!(client.is_err());
     }
 
     #[tokio::test]
