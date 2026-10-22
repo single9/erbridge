@@ -222,6 +222,19 @@ async fn wrong_tokens_are_closed_without_a_reply() {
 }
 
 #[tokio::test]
+async fn a_stalled_handshake_is_dropped() {
+    let serve = start_serve(vec![tenant("ta", "token-a", "a.example.com")]).await;
+
+    // Connect and say nothing: the server must give up on its own.
+    let mut sock = TcpStream::connect(&serve.control).await.unwrap();
+    let mut rest = Vec::new();
+    let closed = tokio::time::timeout(Duration::from_secs(10), sock.read_to_end(&mut rest)).await;
+    assert!(closed.is_ok(), "server kept an idle handshake open");
+    assert!(rest.is_empty());
+    serve.shutdown.cancel();
+}
+
+#[tokio::test]
 async fn unroutable_connections_are_closed_without_a_reply() {
     let serve = start_serve(vec![tenant("ta", "token-a", "a.example.com")]).await;
 

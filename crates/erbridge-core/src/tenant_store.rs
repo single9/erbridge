@@ -134,10 +134,16 @@ impl TenantStore for FileStore {
         // Unique per writer, so a crashed writer's leftover cannot be mistaken
         // for a live one's.
         let tmp = self.sidecar(&format!(".tmp-{}", std::process::id()));
-        write_private(&tmp, text.as_bytes())
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, &self.path)
-            .with_context(|| format!("replacing {}", self.path.display()))?;
+        let written = write_private(&tmp, text.as_bytes())
+            .with_context(|| format!("writing {}", tmp.display()))
+            .and_then(|()| {
+                std::fs::rename(&tmp, &self.path)
+                    .with_context(|| format!("replacing {}", self.path.display()))
+            });
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        written?;
         // The lock is released when `lock` drops.
         Ok(next)
     }
@@ -145,8 +151,14 @@ impl TenantStore for FileStore {
 
 /// Writes `bytes` to `path` readable by its owner only: the file holds PSKs.
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // A leftover from a crashed writer may have looser permissions, and the
+    // mode below only applies to a file this call creates.
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
     let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
+    options.create_new(true).write(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
