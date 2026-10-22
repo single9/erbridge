@@ -217,6 +217,35 @@ tag by hand:
 git checkout vX.Y.Z && cargo publish --workspace
 ```
 
+## Upgrading
+
+### From 0.2 to 0.3
+
+**Using the `erbridge` command: nothing to change.** The commands, flags and config files are
+the same, and the wire protocol is unchanged, so old and new builds interoperate: a 0.2
+`connect` works against a 0.3 `serve` (including its multi-tenant mode) and the other way
+round, and `forward`/`client` with `noise` also mix. You can upgrade one side at a time.
+
+One thing differs if you build from source: the binary crate moved, so install with
+
+```sh
+cargo install --path crates/erbridge     # was: cargo install --path .
+```
+
+(`cargo build --release` at the repository root still produces `target/release/erbridge`.)
+
+**Using erbridge as a library: three changes.** Nothing was ever published to crates.io, so this
+only affects programs that depend on it by `path` or `git`.
+
+- The library is now the `erbridge-core` crate, imported as `erbridge_core` (it was `erbridge`).
+  The `cli` and `tui` modules are no longer part of it.
+- `config::ServeConfig` gained two fields, `tenants_file` and `sni_listen`, and implements
+  `Default`. A struct literal needs `..Default::default()` added.
+- New and optional: `run_serve_with_shutdown`, `run_connect_with_shutdown`,
+  `Registry::subscribe`, and the multi-tenant API (`tenant`, `tenant_store`,
+  `reverse::tenant_serve`, `reverse::enroll`). The existing `run_serve` and `run_connect` are
+  unchanged.
+
 ## Quick start
 
 ### forward: direct forwarding
