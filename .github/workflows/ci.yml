@@ -49,7 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: shellcheck .github/scripts/*.sh
-      - run: .github/scripts/test-next-version.sh
+      - run: bash .github/scripts/test-next-version.sh
 
   # The minimum Rust version declared in Cargo.toml (`rust-version`).
   msrv:
