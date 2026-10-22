@@ -43,6 +43,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
+  # The script that picks the next release version from the commit history.
+  release-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck .github/scripts/*.sh
+      - run: .github/scripts/test-next-version.sh
+
   # The minimum Rust version declared in Cargo.toml (`rust-version`).
   msrv:
     runs-on: ubuntu-latest

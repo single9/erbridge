@@ -1,3 +1,7 @@
+# git-cliff only writes the changelog. The next version number is decided by
+# .github/scripts/next-version.sh, not by git-cliff's own `--bump`, whose
+# handling of 0.x versions differs between releases.
+
 [changelog]
 header = """
 # Changelog\n

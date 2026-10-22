@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "Version bump"
+        description: "Version bump (auto reads the Conventional Commits since the last release)"
         type: choice
-        options: [patch, minor, major]
-        default: patch
+        options: [auto, patch, minor, major]
+        default: auto
       publish:
         description: "Publish to crates.io (untick for a dry run that skips the upload)"
         type: boolean
@@ -35,6 +35,8 @@ jobs:
 
       - name: Bump version, changelog, and tag
         id: bump
+        env:
+          BUMP: ${{ inputs.bump }}
         run: |
           set -euo pipefail
 
@@ -43,13 +45,8 @@ jobs:
           BASE_VERSION="${LATEST_TAG#v}"
           BASE_VERSION="${BASE_VERSION:-$CARGO_VERSION}"
 
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
-          case "${{ inputs.bump }}" in
-            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
-            patch) PATCH=$((PATCH + 1)) ;;
-          esac
-          NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+          # Fails, and so stops the release, when `auto` finds nothing to release.
+          NEW_VERSION=$(.github/scripts/next-version.sh "$BASE_VERSION" "$BUMP")
           NEW_TAG="v$NEW_VERSION"
 
           sed -i -E "0,/^version = \".*\"/s//version = \"$NEW_VERSION\"/" Cargo.toml
