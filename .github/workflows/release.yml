@@ -46,7 +46,7 @@ jobs:
           BASE_VERSION="${BASE_VERSION:-$CARGO_VERSION}"
 
           # Fails, and so stops the release, when `auto` finds nothing to release.
-          NEW_VERSION=$(.github/scripts/next-version.sh "$BASE_VERSION" "$BUMP")
+          NEW_VERSION=$(bash .github/scripts/next-version.sh "$BASE_VERSION" "$BUMP")
           NEW_TAG="v$NEW_VERSION"
 
           sed -i -E "0,/^version = \".*\"/s//version = \"$NEW_VERSION\"/" Cargo.toml

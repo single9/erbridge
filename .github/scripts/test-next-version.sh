@@ -23,7 +23,7 @@ repo() {
 # expect DESCRIPTION WANT DIR BASE BUMP     (WANT "FAIL" = non-zero exit)
 expect() {
   local desc="$1" want="$2" dir="$3" got rc
-  got=$(cd "$dir" && "$script" "$4" "$5" 2>/dev/null)
+  got=$(cd "$dir" && bash "$script" "$4" "$5" 2>/dev/null)
   rc=$?
   if [ "$want" = FAIL ]; then
     if [ "$rc" -ne 0 ]; then
