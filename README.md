@@ -169,8 +169,8 @@ sudo systemctl enable --now erbridge
 Prebuilt binaries for Windows (x86_64), Linux (x86_64 and arm64), and macOS (universal, plus
 separate arm64/x86_64-only archives) are published from the
 [Release workflow](.github/workflows/release.yml). Trigger it manually from the Actions tab
-("Run workflow") and pick a version bump (`patch`/`minor`/`major`); it advances the version
-tag, regenerates [`CHANGELOG.md`](CHANGELOG.md) from [Conventional Commits](https://www.conventionalcommits.org/)
+("Run workflow") and pick a version bump (`auto` by default, or `patch`/`minor`/`major`); it
+advances the version tag, regenerates [`CHANGELOG.md`](CHANGELOG.md) from [Conventional Commits](https://www.conventionalcommits.org/)
 with [git-cliff](https://github.com/orhun/git-cliff) (config: [`cliff.toml`](cliff.toml)),
 builds every platform, and publishes a GitHub release with the archives, that release's
 changelog section as the release notes, plus a signed `SHA256SUMS` manifest.
@@ -189,6 +189,23 @@ cosign verify-blob \
 # 2. Check the archive you downloaded matches the manifest
 sha256sum -c SHA256SUMS --ignore-missing
 ```
+
+### Choosing the version
+
+`auto` reads the [Conventional Commits](https://www.conventionalcommits.org/) since the last
+release tag (rules in [`.github/scripts/next-version.sh`](.github/scripts/next-version.sh)):
+
+| Commits since the last release | Next version |
+| --- | --- |
+| a breaking change (`type!:` or a `BREAKING CHANGE:` footer) | major, or **minor while the version is 0.x** |
+| a `feat:` | minor |
+| anything else (`fix:`, `docs:`, `build:`, ...) | patch |
+| none | the release stops with an error |
+
+Mark breaking changes, including API changes to `erbridge-core`, with `!`: once the project is
+at 1.0 an unmarked one would be released as a minor version. Choose `patch`/`minor`/`major`
+explicitly to override `auto`. The rules are tested in CI
+(`.github/scripts/test-next-version.sh`).
 
 ### Publishing to crates.io
 
