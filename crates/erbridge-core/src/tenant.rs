@@ -25,7 +25,7 @@ pub fn normalize_host(host: &str) -> String {
     host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tenant {
     pub name: String,
     #[serde(with = "hex32")]
@@ -37,8 +37,32 @@ pub struct Tenant {
     pub disabled: bool,
 }
 
+// The PSK is a credential: keep it out of logs and error chains.
+impl std::fmt::Debug for Tenant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tenant")
+            .field("name", &self.name)
+            .field("psk", &"<redacted>")
+            .field("sni", &self.sni)
+            .field("max_conns", &self.max_conns)
+            .field("disabled", &self.disabled)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for EnrollCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnrollCode")
+            .field("psk", &"<redacted>")
+            .field("sni", &self.sni)
+            .field("max_conns", &self.max_conns)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
 /// A single-use PSK that can be redeemed for a new tenant.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnrollCode {
     #[serde(with = "hex32")]
     pub psk: [u8; 32],
@@ -204,6 +228,11 @@ impl TenantSet {
     }
 
     pub fn with_code(&self, code: EnrollCode) -> Result<Self> {
+        // A code for a host a tenant already holds could never be redeemed.
+        let host = normalize_host(&code.sni);
+        if let Some(t) = self.tenants.iter().find(|t| normalize_host(&t.sni) == host) {
+            bail!("sni '{}' already belongs to tenant '{}'", code.sni, t.name);
+        }
         let mut codes = self.codes.clone();
         codes.push(code);
         Self::new(self.tenants.clone(), codes)
@@ -246,7 +275,10 @@ impl TenantSet {
         let code = self
             .codes
             .iter()
-            .find(|c| &c.psk == code_psk && c.expires_at.is_none_or(|at| now_unix < at))
+            .find(|c| {
+                crate::reverse::constant_time_eq(&c.psk, code_psk)
+                    && c.expires_at.is_none_or(|at| now_unix < at)
+            })
             .context("unknown, used or expired enrollment code")?;
         let tenant = Tenant {
             name,
@@ -471,5 +503,30 @@ mod tests {
 
     fn hex_of(b: &[u8; 32]) -> String {
         b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn debug_output_never_contains_the_psk() {
+        let tenant = Tenant {
+            name: "t".into(),
+            psk: [0xab; 32],
+            sni: "a.example.com".into(),
+            max_conns: 1,
+            disabled: false,
+        };
+        let code = EnrollCode {
+            psk: [0xcd; 32],
+            sni: "a.example.com".into(),
+            max_conns: 1,
+            expires_at: None,
+        };
+        let shown = format!("{tenant:?} {code:?}");
+        assert!(shown.contains("<redacted>"));
+        assert!(!shown.contains("171") && !shown.contains("205"), "{shown}");
     }
 }

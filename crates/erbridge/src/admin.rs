@@ -74,7 +74,7 @@ fn now_unix() -> u64 {
 mod tests {
     use super::*;
     use erbridge_core::noise::derive_psk;
-    use erbridge_core::tenant::Tenant;
+    use erbridge_core::tenant::{EnrollCode, Tenant};
 
     fn file() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
@@ -170,12 +170,27 @@ mod tests {
     }
 
     #[test]
-    fn issuing_the_same_host_twice_is_allowed_until_redeemed() {
-        // Two outstanding codes for one host are fine; the clash, if any,
-        // surfaces when the second is redeemed.
+    fn issuing_a_host_a_tenant_holds_is_refused() {
         let (_dir, path) = file();
-        issue(&path, "a.example.com");
-        issue(&path, "a.example.com");
-        assert_eq!(FileStore::new(&path).snapshot().unwrap().codes().len(), 2);
+        let store = FileStore::new(&path);
+        store
+            .add_tenant(Tenant {
+                name: "t-a".into(),
+                psk: [1; 32],
+                sni: "a.example.com".into(),
+                max_conns: 4,
+                disabled: false,
+            })
+            .unwrap();
+        let err = store
+            .issue_code(EnrollCode {
+                psk: [2; 32],
+                sni: "A.Example.com.".into(),
+                max_conns: 4,
+                expires_at: None,
+            })
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("already belongs"), "{err:#}");
+        assert!(store.snapshot().unwrap().codes().is_empty());
     }
 }

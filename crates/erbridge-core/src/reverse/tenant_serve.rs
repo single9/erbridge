@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
@@ -39,6 +39,13 @@ use crate::tenant_store::{FileStore, TenantStore};
 
 /// How long a TLS client gets to send its ClientHello.
 const SNI_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a control connection gets to complete the Noise handshake.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How many control connections may be mid-handshake at once. Each one costs a
+/// trial decryption per known PSK, so the number is bounded.
+const MAX_PENDING_HANDSHAKES: usize = 256;
 
 /// How often the store is re-read for changes.
 const DEFAULT_RELOAD_INTERVAL: Duration = Duration::from_secs(1);
@@ -69,6 +76,8 @@ struct Hub {
     next_session: AtomicU64,
     /// Per-tenant connection budgets, as (capacity, semaphore).
     budgets: Mutex<HashMap<String, (usize, Arc<Semaphore>)>>,
+    /// Slots for connections that have not finished authenticating.
+    handshakes: Arc<Semaphore>,
 }
 
 impl Hub {
@@ -151,6 +160,7 @@ pub async fn run_tenant_serve_with_store(
         sessions: Mutex::new(HashMap::new()),
         next_session: AtomicU64::new(1),
         budgets: Mutex::new(HashMap::new()),
+        handshakes: Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES)),
     });
 
     let control_loop = accept_loop(control_listener, &shutdown, &registry, "control", {
@@ -222,10 +232,16 @@ async fn handle_control(
     shutdown: CancellationToken,
 ) -> Result<()> {
     let _ = sock.set_nodelay(true);
+    let Ok(pending) = hub.handshakes.clone().try_acquire_owned() else {
+        bail!("too many unauthenticated connections, dropped");
+    };
     let candidates = hub.snapshot().candidates(now_unix());
-    let (stream, index) = noise::accept_any(sock, &candidates.psks)
-        .await
-        .context("Noise handshake with tunnel client failed")?;
+    let handshake =
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, noise::accept_any(sock, &candidates.psks))
+            .await
+            .context("Noise handshake timed out")?;
+    let (stream, index) = handshake.context("Noise handshake with tunnel client failed")?;
+    drop(pending);
 
     match candidates.identity(index).clone() {
         Identity::Tenant(tenant) => {
@@ -379,7 +395,7 @@ fn apply(hub: &Hub, next: TenantSet, registry: &Registry) {
     sessions.retain(|name, session| {
         let still_valid = next
             .tenant(name)
-            .is_some_and(|t| !t.disabled && t.psk == session.psk);
+            .is_some_and(|t| !t.disabled && crate::reverse::constant_time_eq(&t.psk, &session.psk));
         if !still_valid {
             session.cancel.cancel();
             registry.info(format!(

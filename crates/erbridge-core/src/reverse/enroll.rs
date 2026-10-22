@@ -20,7 +20,7 @@ const MAX_CREDENTIALS_LEN: usize = 4096;
 
 /// What an enrolled client needs to run `connect`: the token to authenticate
 /// with and the tunnel name `serve` will address it by.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credentials {
     /// Tenant name; use it as the `[[connect.tunnel]]` name.
     pub name: String,
@@ -28,6 +28,16 @@ pub struct Credentials {
     pub token: String,
     /// The host this tenant is reached at.
     pub sni: String,
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("name", &self.name)
+            .field("token", &"<redacted>")
+            .field("sni", &self.sni)
+            .finish()
+    }
 }
 
 impl Credentials {
