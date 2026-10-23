@@ -179,7 +179,7 @@ jobs:
 
       - name: Checksum archives
         working-directory: artifacts
-        run: sha256sum * > SHA256SUMS
+        run: sha256sum -- * > SHA256SUMS
 
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
