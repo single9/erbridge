@@ -4,7 +4,7 @@
 
 **What to build:** `TenantStore` trait (`snapshot`, `redeem`, `issue`,
 `revoke`), `MemoryStore`, `FileStore` (TOML, exclusive lock, atomic rename).
-`serve` polls the file's mtime every second and applies changes.
+`serve` re-reads the store every second and applies changes.
 
 ## Acceptance
 
