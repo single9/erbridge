@@ -5,7 +5,7 @@ terminal UI. It can also run as a multi-tenant server: many users, each with
 their own token and hostname, routed by TLS SNI without decrypting the traffic.
 
 ```sh
-cargo install erbridge
+cargo install erbridge --locked
 erbridge --help
 ```
 
