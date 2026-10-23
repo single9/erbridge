@@ -29,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::ServeConfig;
 use crate::mux::{self, MuxControl};
 use crate::noise;
+use crate::noise::Psk;
 use crate::reverse::enroll::Credentials;
 use crate::reverse::serve::relay;
 use crate::reverse::write_frame;
@@ -68,7 +69,7 @@ pub struct TenantServeConfig {
 struct Session {
     id: u64,
     /// The PSK this session authenticated with, to notice a rotation.
-    psk: [u8; 32],
+    psk: Psk,
     control: MuxControl,
     cancel: CancellationToken,
 }
@@ -350,7 +351,7 @@ async fn run_session(
     let still_allowed = hub
         .snapshot()
         .tenant(&tenant.name)
-        .is_some_and(|t| !t.disabled && crate::reverse::constant_time_eq(&t.psk, &tenant.psk));
+        .is_some_and(|t| !t.disabled && t.psk == tenant.psk);
     if !still_allowed {
         own_cancel.cancel();
     }
@@ -470,7 +471,7 @@ fn apply(hub: &Hub, next: TenantSet, registry: &Registry) {
     sessions.retain(|name, session| {
         let still_valid = next
             .tenant(name)
-            .is_some_and(|t| !t.disabled && crate::reverse::constant_time_eq(&t.psk, &session.psk));
+            .is_some_and(|t| !t.disabled && t.psk == session.psk);
         if !still_valid {
             session.cancel.cancel();
             registry.info(format!(

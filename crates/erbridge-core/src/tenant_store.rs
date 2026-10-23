@@ -11,6 +11,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use crate::noise::Psk;
 use anyhow::{Context, Result};
 
 use crate::tenant::{EnrollCode, Tenant, TenantSet};
@@ -49,13 +50,7 @@ pub trait TenantStore: Send + Sync {
 
     /// Burns an enrollment code and creates the tenant it entitles. Exactly one
     /// of several concurrent redemptions of the same code succeeds.
-    fn redeem(
-        &self,
-        code_psk: &[u8; 32],
-        now_unix: u64,
-        name: String,
-        psk: [u8; 32],
-    ) -> Result<Tenant> {
+    fn redeem(&self, code_psk: &Psk, now_unix: u64, name: String, psk: Psk) -> Result<Tenant> {
         let mut created = None;
         self.replace_with(&mut |s| {
             let (next, tenant) = s.redeem(code_psk, now_unix, name.clone(), psk)?;

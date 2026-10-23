@@ -113,7 +113,7 @@ pub async fn run_serve_with_shutdown(
 async fn handle_control_conn(
     sock: TcpStream,
     peer: SocketAddr,
-    psk: [u8; 32],
+    psk: noise::Psk,
     registry: Registry,
     current_tx: watch::Sender<Option<MuxControl>>,
     shutdown: CancellationToken,

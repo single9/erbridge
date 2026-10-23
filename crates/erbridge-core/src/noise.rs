@@ -35,11 +35,76 @@ const NOISE_PATTERN: &str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
 const MAX_PLAINTEXT: usize = 65535 - 16;
 const MAX_MESSAGE: usize = 65535;
 
-/// Derives a 32-byte Noise PSK from an operator-facing token of any length.
-pub fn derive_psk(token: &str) -> [u8; 32] {
+/// A 32-byte Noise pre-shared key.
+///
+/// A distinct type so a PSK cannot be mistaken for any other 32 bytes, cannot
+/// be printed by accident ([`Debug`] redacts it), and is always compared in
+/// constant time.
+#[derive(Clone, Copy)]
+pub struct Psk([u8; 32]);
+
+impl Psk {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl PartialEq for Psk {
+    fn eq(&self, other: &Self) -> bool {
+        crate::reverse::constant_time_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Psk {}
+
+impl std::hash::Hash for Psk {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl std::fmt::Debug for Psk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Psk(<redacted>)")
+    }
+}
+
+/// Stored as 64 lowercase hex characters, the form of the tenant file.
+impl serde::Serialize for Psk {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut out = String::with_capacity(64);
+        for b in &self.0 {
+            out.push_str(&format!("{b:02x}"));
+        }
+        s.serialize_str(&out)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Psk {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let text = String::deserialize(d)?;
+        if text.len() != 64 || !text.is_ascii() {
+            return Err(D::Error::custom("psk must be 64 hex characters"));
+        }
+        let mut out = [0u8; 32];
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16)
+                .map_err(|_| D::Error::custom("psk must be 64 hex characters"))?;
+        }
+        Ok(Self(out))
+    }
+}
+
+/// Derives a Noise PSK from an operator-facing token of any length.
+pub fn derive_psk(token: &str) -> Psk {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
-    hasher.finalize().into()
+    Psk(hasher.finalize().into())
 }
 
 fn to_io_err(e: snow::Error) -> io::Error {
@@ -49,13 +114,13 @@ fn to_io_err(e: snow::Error) -> io::Error {
 /// Runs the initiator side of the handshake over `io` and returns a
 /// transport-mode stream. Used by `connect` (dialling `serve`) and `client`
 /// (dialling a `transport = "noise"` forward mapping).
-pub async fn connect<T>(mut io: T, psk: &[u8; 32]) -> Result<NoiseStream<T>>
+pub async fn connect<T>(mut io: T, psk: &Psk) -> Result<NoiseStream<T>>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     let params = NOISE_PATTERN.parse().expect("valid static Noise params");
     let mut hs = Builder::new(params)
-        .psk(0, psk)
+        .psk(0, psk.as_bytes())
         .context("configuring Noise PSK")?
         .build_initiator()
         .context("building Noise initiator")?;
@@ -83,7 +148,7 @@ where
 /// Runs the responder side of the handshake over `io` and returns a
 /// transport-mode stream. Used by `serve` (accepting `connect`) and `forward`
 /// (accepting a client on a `transport = "noise"` mapping).
-pub async fn accept<T>(io: T, psk: &[u8; 32]) -> Result<NoiseStream<T>>
+pub async fn accept<T>(io: T, psk: &Psk) -> Result<NoiseStream<T>>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
@@ -99,7 +164,7 @@ where
 /// Every candidate is tried even after a match, so the time taken does not
 /// reveal the matching position. On no match the connection is dropped without
 /// a reply, exactly as for a single wrong PSK.
-pub async fn accept_any<T>(mut io: T, psks: &[[u8; 32]]) -> Result<(NoiseStream<T>, usize)>
+pub async fn accept_any<T>(mut io: T, psks: &[Psk]) -> Result<(NoiseStream<T>, usize)>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
@@ -112,7 +177,7 @@ where
     for (index, psk) in psks.iter().enumerate() {
         let params = NOISE_PATTERN.parse().expect("valid static Noise params");
         let mut hs = Builder::new(params)
-            .psk(0, psk)
+            .psk(0, psk.as_bytes())
             .context("configuring Noise PSK")?
             .build_responder()
             .context("building Noise responder")?;
@@ -459,7 +524,7 @@ mod tests {
         // inspected afterwards.
         let params = NOISE_PATTERN.parse().unwrap();
         let mut hs = Builder::new(params)
-            .psk(0, &wrong)
+            .psk(0, wrong.as_bytes())
             .unwrap()
             .build_initiator()
             .unwrap();
