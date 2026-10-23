@@ -9,7 +9,7 @@ on:
         options: [auto, patch, minor, major]
         default: auto
       publish:
-        description: "Publish to crates.io (untick for a dry run that skips the upload)"
+        description: "Release for real (untick for a dry run: works out the version and checks packaging, pushes nothing)"
         type: boolean
         default: true
 
@@ -37,6 +37,7 @@ jobs:
         id: bump
         env:
           BUMP: ${{ inputs.bump }}
+          PUBLISH: ${{ inputs.publish }}
         run: |
           set -euo pipefail
 
@@ -70,8 +71,11 @@ jobs:
           git add Cargo.toml Cargo.lock CHANGELOG.md
           git commit -m "chore(release): $NEW_TAG"
           git tag "$NEW_TAG"
-          git push origin HEAD:${{ github.ref_name }}
-          git push origin "$NEW_TAG"
+          # A dry run keeps the commit and tag local to this runner: nothing reaches the repository.
+          if [ "$PUBLISH" = "true" ]; then
+            git push origin HEAD:${{ github.ref_name }}
+            git push origin "$NEW_TAG"
+          fi
 
           echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
@@ -81,8 +85,31 @@ jobs:
           name: release-notes
           path: RELEASE_NOTES.md
 
+      # Dry run: the rest of the workflow is skipped, so check here that the bumped
+      # tree packages for crates.io, and show what would have been released.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: ${{ !inputs.publish }}
+        with:
+          toolchain: stable
+
+      - name: Dry run
+        if: ${{ !inputs.publish }}
+        env:
+          NEW_TAG: ${{ steps.bump.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cargo publish --workspace --dry-run
+          {
+            echo "## Dry run: would release $NEW_TAG"
+            echo
+            echo "Nothing was pushed, tagged or published."
+            echo
+            cat RELEASE_NOTES.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
   build:
     needs: version
+    if: ${{ inputs.publish }}
     strategy:
       fail-fast: false
       matrix:
@@ -164,6 +191,7 @@ jobs:
 
   sign-and-release:
     needs: [version, build]
+    if: ${{ inputs.publish }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -209,6 +237,7 @@ jobs:
   # publishing the tag by hand (see README, "Publishing to crates.io").
   publish-crates:
     needs: [version, sign-and-release]
+    if: ${{ inputs.publish }}
     runs-on: ubuntu-latest
     environment: crates-io
     steps:
@@ -224,15 +253,10 @@ jobs:
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          PUBLISH: ${{ inputs.publish }}
         run: |
           set -euo pipefail
-          if [ "$PUBLISH" = "true" ]; then
-            if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
-              echo "CARGO_REGISTRY_TOKEN is not set (see README, Publishing to crates.io)" >&2
-              exit 1
-            fi
-            cargo publish --workspace
-          else
-            cargo publish --workspace --dry-run
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "CARGO_REGISTRY_TOKEN is not set (see README, Publishing to crates.io)" >&2
+            exit 1
           fi
+          cargo publish --workspace

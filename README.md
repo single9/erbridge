@@ -222,9 +222,10 @@ One-time setup:
 
 The first release has to create both crate names, so the token needs `publish-new` at that point.
 
-Run the workflow with **publish** unticked for a dry run: it builds and packages everything and
-skips only the upload. The CI workflow does the same check on every push
-(`cargo publish --workspace --dry-run`). Publishing is permanent, so a bad release is fixed by
+Run the workflow with **publish** unticked for a dry run: it works out the version, generates the
+changelog and runs `cargo publish --workspace --dry-run` on the bumped tree, then stops. Nothing is
+committed, tagged, built, released or uploaded, so it can be repeated freely; the run's summary shows
+the version and release notes. A real run (publish ticked) is the only one that changes the repository. Publishing is permanent, so a bad release is fixed by
 yanking the version and releasing the next patch.
 
 If only `publish-crates` failed (for example an expired token), fix the secret and publish the
