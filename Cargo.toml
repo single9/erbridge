@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/erbridge-core", "crates/erbridge"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["Duye Chen <k078264@gmail.com>"]
 license = "MIT"
@@ -16,7 +16,7 @@ rust-version = "1.89"
 # workflow; the two must stay equal for `cargo publish` to resolve the path
 # dependency against crates.io.
 [workspace.dependencies]
-erbridge-core = { path = "crates/erbridge-core", version = "0.2.0" }
+erbridge-core = { path = "crates/erbridge-core", version = "0.3.0" }
 
 [profile.release]
 lto = "thin"
