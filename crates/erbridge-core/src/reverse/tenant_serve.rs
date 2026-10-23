@@ -16,10 +16,10 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
@@ -69,6 +69,15 @@ struct Session {
     cancel: CancellationToken,
 }
 
+/// Locks `mutex`, carrying on if another task panicked while holding it. The
+/// guarded maps are only ever mutated by single calls, so they are never left
+/// half-updated, and one panic must not take every later connection down.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 struct Hub {
     store: Arc<dyn TenantStore>,
     set: watch::Sender<Arc<TenantSet>>,
@@ -78,6 +87,8 @@ struct Hub {
     budgets: Mutex<HashMap<String, (usize, Arc<Semaphore>)>>,
     /// Slots for connections that have not finished authenticating.
     handshakes: Arc<Semaphore>,
+    /// Connections turned away because `handshakes` was exhausted.
+    refused: AtomicU64,
 }
 
 impl Hub {
@@ -89,7 +100,7 @@ impl Hub {
     /// individual connections.
     fn try_acquire(&self, tenant: &Tenant) -> Option<OwnedSemaphorePermit> {
         let semaphore = {
-            let mut budgets = self.budgets.lock().unwrap();
+            let mut budgets = lock(&self.budgets);
             let entry = budgets
                 .entry(tenant.name.clone())
                 .or_insert_with(|| (tenant.max_conns, Arc::new(Semaphore::new(tenant.max_conns))));
@@ -161,6 +172,7 @@ pub async fn run_tenant_serve_with_store(
         next_session: AtomicU64::new(1),
         budgets: Mutex::new(HashMap::new()),
         handshakes: Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES)),
+        refused: AtomicU64::new(0),
     });
 
     let control_loop = accept_loop(control_listener, &shutdown, &registry, "control", {
@@ -233,7 +245,16 @@ async fn handle_control(
 ) -> Result<()> {
     let _ = sock.set_nodelay(true);
     let Ok(pending) = hub.handshakes.clone().try_acquire_owned() else {
-        bail!("too many unauthenticated connections, dropped");
+        // Under a flood this would be one log line per connection, so report
+        // the first and then every thousandth.
+        let n = hub.refused.fetch_add(1, Ordering::Relaxed);
+        if n == 0 || n % 1000 == 999 {
+            registry.error(format!(
+                "serve: {peer}: too many unauthenticated connections; refused {} so far",
+                n + 1
+            ));
+        }
+        return Ok(());
     };
     let candidates = hub.snapshot().candidates(now_unix());
     let handshake =
@@ -267,7 +288,7 @@ async fn run_session(
     // A new session takes over from any older one for the same tenant, so a
     // client reconnecting after a network drop is not locked out until the
     // dead connection times out.
-    let replaced = hub.sessions.lock().unwrap().insert(
+    let replaced = lock(&hub.sessions).insert(
         tenant.name.clone(),
         Session {
             id,
@@ -293,7 +314,7 @@ async fn run_session(
     // progress, ending once the connection (or this session) goes away.
     while inbound_rx.recv().await.is_some() {}
 
-    let mut sessions = hub.sessions.lock().unwrap();
+    let mut sessions = lock(&hub.sessions);
     if sessions.get(&tenant.name).is_some_and(|s| s.id == id) {
         sessions.remove(&tenant.name);
     }
@@ -319,10 +340,7 @@ async fn handle_sni(
         .tenant_by_sni(&host)
         .cloned()
         .ok_or_else(|| anyhow!("no tenant for host '{host}'"))?;
-    let control = hub
-        .sessions
-        .lock()
-        .unwrap()
+    let control = lock(&hub.sessions)
         .get(&tenant.name)
         .map(|s| s.control.clone())
         .ok_or_else(|| anyhow!("tenant '{}' is offline", tenant.name))?;
@@ -391,7 +409,7 @@ fn apply(hub: &Hub, next: TenantSet, registry: &Registry) {
     let next = Arc::new(next);
     hub.set.send_replace(next.clone());
 
-    let mut sessions = hub.sessions.lock().unwrap();
+    let mut sessions = lock(&hub.sessions);
     sessions.retain(|name, session| {
         let still_valid = next
             .tenant(name)
@@ -405,10 +423,7 @@ fn apply(hub: &Hub, next: TenantSet, registry: &Registry) {
         still_valid
     });
     drop(sessions);
-    hub.budgets
-        .lock()
-        .unwrap()
-        .retain(|name, _| next.tenant(name).is_some());
+    lock(&hub.budgets).retain(|name, _| next.tenant(name).is_some());
     registry.info(format!(
         "serve: reloaded tenants, {} now configured",
         next.tenants().len()
