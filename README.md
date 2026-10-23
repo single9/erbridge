@@ -131,17 +131,26 @@ before extracting if you want to confirm integrity:
 sha256sum -c SHA256SUMS --ignore-missing
 ```
 
-### Build and install with cargo
-
-Install the `erbridge` binary onto your system's `PATH` via `cargo install`:
+### Install from crates.io
 
 ```sh
-cargo install --path crates/erbridge
+cargo install erbridge --locked
 ```
 
-This builds a release binary and copies it to `~/.cargo/bin/erbridge` (make sure that
-directory is on your `PATH`; `cargo install` prints a warning if it isn't). Run
-`cargo install --path crates/erbridge --force` to reinstall after pulling new changes.
+This downloads the published release, builds it and copies the binary to `~/.cargo/bin/erbridge`
+(make sure that directory is on your `PATH`; `cargo install` prints a warning if it isn't).
+`--locked` builds with the dependency versions the release was tested with. Run
+`cargo install erbridge --locked --force` to update to a newer release. Needs Rust 1.89 or newer.
+
+### Build and install from source
+
+From a checkout of this repository:
+
+```sh
+cargo install --path crates/erbridge --locked
+```
+
+Run it again with `--force` to reinstall after pulling new changes.
 
 ### Run as a systemd service (Linux)
 
@@ -252,8 +261,8 @@ cargo install --path crates/erbridge     # was: cargo install --path .
 
 (`cargo build --release` at the repository root still produces `target/release/erbridge`.)
 
-**Using erbridge as a library: three changes.** Nothing was ever published to crates.io, so this
-only affects programs that depend on it by `path` or `git`.
+**Using erbridge as a library: three changes.** Before 0.3 nothing was published to crates.io, so this
+only affects programs that depended on it by `path` or `git`.
 
 - The library is now the `erbridge-core` crate, imported as `erbridge_core` (it was `erbridge`).
   The `cli` and `tui` modules are no longer part of it.
@@ -467,8 +476,8 @@ task.await??;
 
 `run_serve_with_shutdown` works the same way for the `serve` role, and returns once every
 listener and tunnelled connection is closed and its port released. `run_serve` and
-`run_connect` are the same without a shutdown handle. The crate is not published to
-crates.io yet; depend on it with a `git` or `path` dependency.
+`run_connect` are the same without a shutdown handle. Add it to a project
+with `cargo add erbridge-core`; the API docs are on [docs.rs](https://docs.rs/erbridge-core).
 
 ## Tests
 
