@@ -53,7 +53,7 @@ own secret) cannot.
    under a file lock; a code works once and not after expiry.
 7. **Store.** `TenantStore` trait with in-memory and file-backed
    implementations. The file is written by atomic rename under an exclusive
-   lock; `serve` polls its mtime once a second and applies changes without
+   lock; `serve` re-reads it once a second (the store is a trait, so there is no file-specific mtime check) and applies changes without
    restarting.
 
 ## Non-goals

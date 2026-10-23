@@ -235,6 +235,26 @@ async fn a_stalled_handshake_is_dropped() {
 }
 
 #[tokio::test]
+async fn one_address_cannot_hold_every_handshake_slot() {
+    let serve = start_serve(vec![tenant("ta", "token-a", "a.example.com")]).await;
+
+    // 16 idle connections from one address fill its share...
+    let mut idle = Vec::new();
+    for _ in 0..16 {
+        idle.push(TcpStream::connect(&serve.control).await.unwrap());
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // ...so the next one is turned away at once, not after the timeout.
+    let mut extra = TcpStream::connect(&serve.control).await.unwrap();
+    let mut rest = Vec::new();
+    let closed = tokio::time::timeout(Duration::from_secs(2), extra.read_to_end(&mut rest)).await;
+    assert!(closed.is_ok(), "the 17th connection was kept waiting");
+    drop(idle);
+    serve.shutdown.cancel();
+}
+
+#[tokio::test]
 async fn unroutable_connections_are_closed_without_a_reply() {
     let serve = start_serve(vec![tenant("ta", "token-a", "a.example.com")]).await;
 

@@ -14,7 +14,7 @@
 //! here, so a client cannot steer traffic at another tenant's target.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -46,6 +46,10 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How many control connections may be mid-handshake at once. Each one costs a
 /// trial decryption per known PSK, so the number is bounded.
 const MAX_PENDING_HANDSHAKES: usize = 256;
+
+/// How many of those one address may hold, so a single host cannot use up
+/// every slot.
+const MAX_PENDING_PER_IP: usize = 16;
 
 /// How often the store is re-read for changes.
 const DEFAULT_RELOAD_INTERVAL: Duration = Duration::from_secs(1);
@@ -89,6 +93,47 @@ struct Hub {
     handshakes: Arc<Semaphore>,
     /// Connections turned away because `handshakes` was exhausted.
     refused: AtomicU64,
+    /// Connections mid-handshake, per source address.
+    pending_by_ip: Mutex<HashMap<IpAddr, usize>>,
+}
+
+/// Holds one handshake slot, global and per address, until dropped.
+struct PendingSlot<'a> {
+    hub: &'a Hub,
+    ip: IpAddr,
+    _global: OwnedSemaphorePermit,
+}
+
+impl Drop for PendingSlot<'_> {
+    fn drop(&mut self) {
+        let mut by_ip = lock(&self.hub.pending_by_ip);
+        if let Some(n) = by_ip.get_mut(&self.ip) {
+            *n -= 1;
+            if *n == 0 {
+                by_ip.remove(&self.ip);
+            }
+        }
+    }
+}
+
+impl Hub {
+    /// Takes a handshake slot for `ip`, or `None` if the server or that
+    /// address is at its limit.
+    fn try_pending(&self, ip: IpAddr) -> Option<PendingSlot<'_>> {
+        let global = self.handshakes.clone().try_acquire_owned().ok()?;
+        let mut by_ip = lock(&self.pending_by_ip);
+        let n = by_ip.entry(ip).or_insert(0);
+        if *n >= MAX_PENDING_PER_IP {
+            return None;
+        }
+        *n += 1;
+        drop(by_ip);
+        Some(PendingSlot {
+            hub: self,
+            ip,
+            _global: global,
+        })
+    }
 }
 
 impl Hub {
@@ -173,6 +218,7 @@ pub async fn run_tenant_serve_with_store(
         budgets: Mutex::new(HashMap::new()),
         handshakes: Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES)),
         refused: AtomicU64::new(0),
+        pending_by_ip: Mutex::new(HashMap::new()),
     });
 
     let control_loop = accept_loop(control_listener, &shutdown, &registry, "control", {
@@ -244,13 +290,13 @@ async fn handle_control(
     shutdown: CancellationToken,
 ) -> Result<()> {
     let _ = sock.set_nodelay(true);
-    let Ok(pending) = hub.handshakes.clone().try_acquire_owned() else {
+    let Some(pending) = hub.try_pending(peer.ip()) else {
         // Under a flood this would be one log line per connection, so report
         // the first and then every thousandth.
         let n = hub.refused.fetch_add(1, Ordering::Relaxed);
         if n == 0 || n % 1000 == 999 {
             registry.error(format!(
-                "serve: {peer}: too many unauthenticated connections; refused {} so far",
+                "serve: {peer}: too many unauthenticated connections (server or per-address limit); refused {} so far",
                 n + 1
             ));
         }
@@ -283,6 +329,7 @@ async fn run_session(
     let cancel = shutdown.child_token();
     let (control, mut inbound_rx) =
         mux::spawn_with_shutdown(stream.compat(), mux::Mode::Client, cancel.clone());
+    let own_cancel = cancel.clone();
     let id = hub.next_session.fetch_add(1, Ordering::Relaxed);
 
     // A new session takes over from any older one for the same tenant, so a
@@ -297,6 +344,16 @@ async fn run_session(
             cancel,
         },
     );
+    // `apply` publishes the new snapshot before it sweeps the sessions, so a
+    // tenant removed while this handshake was running is caught by one of the
+    // two: either the sweep sees this session, or this check sees the snapshot.
+    let still_allowed = hub
+        .snapshot()
+        .tenant(&tenant.name)
+        .is_some_and(|t| !t.disabled && crate::reverse::constant_time_eq(&t.psk, &tenant.psk));
+    if !still_allowed {
+        own_cancel.cancel();
+    }
     if let Some(old) = replaced {
         old.cancel.cancel();
         registry.info(format!(
@@ -432,7 +489,8 @@ fn apply(hub: &Hub, next: TenantSet, registry: &Registry) {
 
 /// Redeems an enrollment code: creates the tenant, persists it, and sends the
 /// credentials back inside the encrypted channel. The code is burned before the
-/// credentials are sent, so a client that never receives them needs a new code.
+/// credentials are sent, so a client that never receives them needs a new code;
+/// the tenant created for it is withdrawn again.
 async fn run_enrollment(
     hub: &Hub,
     code: EnrollCode,
@@ -461,10 +519,25 @@ async fn run_enrollment(
         token,
         sni: created.sni.clone(),
     };
-    write_frame(&mut stream, &serde_json::to_vec(&credentials)?)
-        .await
-        .context("sending credentials")?;
-    let _ = stream.shutdown().await;
+    let sent = async {
+        write_frame(&mut stream, &serde_json::to_vec(&credentials)?).await?;
+        stream.shutdown().await?;
+        anyhow::Ok(())
+    }
+    .await;
+    if let Err(e) = sent {
+        // The client never got the token, so nobody can use this tenant: take
+        // it back rather than leave a live entry with no owner.
+        let store = hub.store.clone();
+        let orphan = created.name.clone();
+        if let Ok(Ok(())) = tokio::task::spawn_blocking(move || store.revoke(&orphan)).await {
+            let store = hub.store.clone();
+            if let Ok(Ok(next)) = tokio::task::spawn_blocking(move || store.snapshot()).await {
+                apply(hub, next, registry);
+            }
+        }
+        return Err(e.context("sending credentials; the new tenant was withdrawn"));
+    }
     registry.info(format!(
         "serve: enrolled tenant '{}' for {} from {peer}",
         created.name, created.sni

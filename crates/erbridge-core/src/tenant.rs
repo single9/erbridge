@@ -290,7 +290,11 @@ impl TenantSet {
         let codes = self
             .codes
             .iter()
-            .filter(|c| &c.psk != code_psk)
+            // Expired codes can never be redeemed; drop them while here.
+            .filter(|c| {
+                !crate::reverse::constant_time_eq(&c.psk, code_psk)
+                    && c.expires_at.is_none_or(|at| now_unix < at)
+            })
             .cloned()
             .collect();
         let mut tenants = self.tenants.clone();
@@ -528,5 +532,28 @@ mod redaction_tests {
         let shown = format!("{tenant:?} {code:?}");
         assert!(shown.contains("<redacted>"));
         assert!(!shown.contains("171") && !shown.contains("205"), "{shown}");
+    }
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+
+    #[test]
+    fn redeeming_drops_other_expired_codes() {
+        let code = |b: u8, expires_at| EnrollCode {
+            psk: [b; 32],
+            sni: format!("h{b}.example.com"),
+            max_conns: 1,
+            expires_at,
+        };
+        let set = TenantSet::new(
+            vec![],
+            vec![code(1, None), code(2, Some(50)), code(3, Some(500))],
+        )
+        .unwrap();
+        let (next, _) = set.redeem(&[1; 32], 100, "t-x".into(), [9; 32]).unwrap();
+        let left: Vec<u8> = next.codes().iter().map(|c| c.psk[0]).collect();
+        assert_eq!(left, vec![3]);
     }
 }
