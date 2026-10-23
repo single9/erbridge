@@ -73,7 +73,7 @@ fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use erbridge_core::noise::derive_psk;
+    use erbridge_core::noise::{Psk, derive_psk};
     use erbridge_core::tenant::{EnrollCode, Tenant};
 
     fn file() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -176,7 +176,7 @@ mod tests {
         store
             .add_tenant(Tenant {
                 name: "t-a".into(),
-                psk: [1; 32],
+                psk: Psk::from_bytes([1; 32]),
                 sni: "a.example.com".into(),
                 max_conns: 4,
                 disabled: false,
@@ -184,7 +184,7 @@ mod tests {
             .unwrap();
         let err = store
             .issue_code(EnrollCode {
-                psk: [2; 32],
+                psk: Psk::from_bytes([2; 32]),
                 sni: "A.Example.com.".into(),
                 max_conns: 4,
                 expires_at: None,

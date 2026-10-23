@@ -73,7 +73,7 @@ pub async fn run_forward(rules: Vec<ForwardRule>, registry: Registry) -> Result<
 enum ConnSecurity {
     Plain,
     Tls(TlsAcceptor),
-    Noise([u8; 32]),
+    Noise(noise::Psk),
 }
 
 async fn run_tcp_forward(rule: ForwardRule, registry: Registry) -> Result<()> {

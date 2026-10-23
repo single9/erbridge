@@ -12,6 +12,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::noise::Psk;
+
 pub const DEFAULT_MAX_CONNS: usize = 64;
 
 fn default_max_conns() -> usize {
@@ -25,11 +27,10 @@ pub fn normalize_host(host: &str) -> String {
     host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase()
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tenant {
     pub name: String,
-    #[serde(with = "hex32")]
-    pub psk: [u8; 32],
+    pub psk: Psk,
     pub sni: String,
     #[serde(default = "default_max_conns")]
     pub max_conns: usize,
@@ -37,35 +38,10 @@ pub struct Tenant {
     pub disabled: bool,
 }
 
-// The PSK is a credential: keep it out of logs and error chains.
-impl std::fmt::Debug for Tenant {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Tenant")
-            .field("name", &self.name)
-            .field("psk", &"<redacted>")
-            .field("sni", &self.sni)
-            .field("max_conns", &self.max_conns)
-            .field("disabled", &self.disabled)
-            .finish()
-    }
-}
-
-impl std::fmt::Debug for EnrollCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EnrollCode")
-            .field("psk", &"<redacted>")
-            .field("sni", &self.sni)
-            .field("max_conns", &self.max_conns)
-            .field("expires_at", &self.expires_at)
-            .finish()
-    }
-}
-
 /// A single-use PSK that can be redeemed for a new tenant.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnrollCode {
-    #[serde(with = "hex32")]
-    pub psk: [u8; 32],
+    pub psk: Psk,
     pub sni: String,
     #[serde(default = "default_max_conns")]
     pub max_conns: usize,
@@ -84,7 +60,7 @@ pub enum Identity {
 /// The PSKs to try for one handshake, and what each one stands for.
 #[derive(Debug, Clone, Default)]
 pub struct Candidates {
-    pub psks: Vec<[u8; 32]>,
+    pub psks: Vec<Psk>,
     ids: Vec<Identity>,
 }
 
@@ -267,18 +243,15 @@ impl TenantSet {
     /// code or it has expired at `now_unix`.
     pub fn redeem(
         &self,
-        code_psk: &[u8; 32],
+        code_psk: &Psk,
         now_unix: u64,
         name: String,
-        psk: [u8; 32],
+        psk: Psk,
     ) -> Result<(Self, Tenant)> {
         let code = self
             .codes
             .iter()
-            .find(|c| {
-                crate::reverse::constant_time_eq(&c.psk, code_psk)
-                    && c.expires_at.is_none_or(|at| now_unix < at)
-            })
+            .find(|c| c.psk == *code_psk && c.expires_at.is_none_or(|at| now_unix < at))
             .context("unknown, used or expired enrollment code")?;
         let tenant = Tenant {
             name,
@@ -291,10 +264,7 @@ impl TenantSet {
             .codes
             .iter()
             // Expired codes can never be redeemed; drop them while here.
-            .filter(|c| {
-                !crate::reverse::constant_time_eq(&c.psk, code_psk)
-                    && c.expires_at.is_none_or(|at| now_unix < at)
-            })
+            .filter(|c| c.psk != *code_psk && c.expires_at.is_none_or(|at| now_unix < at))
             .cloned()
             .collect();
         let mut tenants = self.tenants.clone();
@@ -339,31 +309,6 @@ impl TenantSet {
 }
 
 /// Serde adapter storing a 32-byte PSK as 64 hex characters.
-mod hex32 {
-    use serde::{Deserialize, Deserializer, Serializer, de::Error};
-
-    pub fn serialize<S: Serializer>(bytes: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
-        let mut out = String::with_capacity(64);
-        for b in bytes {
-            out.push_str(&format!("{b:02x}"));
-        }
-        s.serialize_str(&out)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
-        let text = String::deserialize(d)?;
-        if text.len() != 64 || !text.is_ascii() {
-            return Err(D::Error::custom("psk must be 64 hex characters"));
-        }
-        let mut out = [0u8; 32];
-        for (i, byte) in out.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16)
-                .map_err(|_| D::Error::custom("psk must be 64 hex characters"))?;
-        }
-        Ok(out)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,7 +424,10 @@ mod tests {
             tenant: vec![tenant("a", "ta", "a.x")],
         };
         let text = toml::to_string(&original).unwrap();
-        assert!(text.contains(&format!("psk = \"{}\"", hex_of(&derive_psk("ta")))));
+        assert!(text.contains(&format!(
+            "psk = \"{}\"",
+            hex_of(derive_psk("ta").as_bytes())
+        )));
         assert!(!text.contains("\"ta\""), "the token must never be stored");
         assert_eq!(toml::from_str::<File>(&text).unwrap(), original);
     }
@@ -518,13 +466,13 @@ mod redaction_tests {
     fn debug_output_never_contains_the_psk() {
         let tenant = Tenant {
             name: "t".into(),
-            psk: [0xab; 32],
+            psk: Psk::from_bytes([0xab; 32]),
             sni: "a.example.com".into(),
             max_conns: 1,
             disabled: false,
         };
         let code = EnrollCode {
-            psk: [0xcd; 32],
+            psk: Psk::from_bytes([0xcd; 32]),
             sni: "a.example.com".into(),
             max_conns: 1,
             expires_at: None,
@@ -542,7 +490,7 @@ mod prune_tests {
     #[test]
     fn redeeming_drops_other_expired_codes() {
         let code = |b: u8, expires_at| EnrollCode {
-            psk: [b; 32],
+            psk: Psk::from_bytes([b; 32]),
             sni: format!("h{b}.example.com"),
             max_conns: 1,
             expires_at,
@@ -552,8 +500,15 @@ mod prune_tests {
             vec![code(1, None), code(2, Some(50)), code(3, Some(500))],
         )
         .unwrap();
-        let (next, _) = set.redeem(&[1; 32], 100, "t-x".into(), [9; 32]).unwrap();
-        let left: Vec<u8> = next.codes().iter().map(|c| c.psk[0]).collect();
+        let (next, _) = set
+            .redeem(
+                &Psk::from_bytes([1; 32]),
+                100,
+                "t-x".into(),
+                Psk::from_bytes([9; 32]),
+            )
+            .unwrap();
+        let left: Vec<u8> = next.codes().iter().map(|c| c.psk.as_bytes()[0]).collect();
         assert_eq!(left, vec![3]);
     }
 }

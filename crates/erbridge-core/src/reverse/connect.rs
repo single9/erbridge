@@ -72,7 +72,7 @@ pub async fn run_connect_with_shutdown(
 
 async fn run_one_session(
     cfg: &ConnectConfig,
-    psk: &[u8; 32],
+    psk: &noise::Psk,
     targets: &HashMap<String, String>,
     registry: &Registry,
     shutdown: &CancellationToken,
