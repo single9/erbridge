@@ -1,5 +1,9 @@
 # erbridge-core
 
+[![crates.io](https://img.shields.io/crates/v/erbridge-core.svg)](https://crates.io/crates/erbridge-core)
+[![docs.rs](https://docs.rs/erbridge-core/badge.svg)](https://docs.rs/erbridge-core)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 The library behind [`erbridge`](https://github.com/single9/erbridge): TCP/UDP
 forwarding and reverse (NAT-traversal) tunnels secured with the Noise protocol,
 plus a multi-tenant server that routes TLS connections to tenants by SNI without

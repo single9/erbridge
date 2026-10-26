@@ -1,5 +1,10 @@
 # erbridge
 
+[![crates.io: erbridge](https://img.shields.io/crates/v/erbridge.svg)](https://crates.io/crates/erbridge)
+[![crates.io: erbridge-core](https://img.shields.io/crates/v/erbridge-core.svg)](https://crates.io/crates/erbridge-core)
+[![docs.rs](https://docs.rs/erbridge-core/badge.svg)](https://docs.rs/erbridge-core)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Low-latency TCP/UDP port forwarder with a built-in reverse-connection (NAT traversal) mode and a live traffic-monitoring TUI.
 
 ## Four modes

@@ -1,5 +1,8 @@
 # erbridge
 
+[![crates.io](https://img.shields.io/crates/v/erbridge.svg)](https://crates.io/crates/erbridge)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A low-latency TCP/UDP port forwarder and reverse (NAT-traversal) tunnel with a
 terminal UI. It can also run as a multi-tenant server: many users, each with
 their own token and hostname, routed by TLS SNI without decrypting the traffic.
