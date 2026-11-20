@@ -14,10 +14,17 @@ body = """
 {% else %}\
     ## [Unreleased]
 {% endif %}\
+{% set breaking = commits | filter(attribute="breaking", value=true) %}\
+{% if breaking | length > 0 %}
+    ### ⚠ Breaking Changes
+    {% for commit in breaking %}
+        - {{ commit.breaking_description | default(value=commit.message) | replace(from="\n", to=" ") | upper_first }}\
+    {% endfor %}
+{% endif %}\
 {% for group, commits in commits | group_by(attribute="group") %}
     ### {{ group | striptags | trim | upper_first }}
     {% for commit in commits %}
-        - {{ commit.message | upper_first }}\
+        - {% if commit.breaking %}**BREAKING** {% endif %}{{ commit.message | upper_first }}\
     {% endfor %}
 {% endfor %}\n
 """
@@ -43,7 +50,7 @@ commit_parsers = [
     { message = "^chore\\(release\\)", skip = true },
     { message = "^chore", group = "Miscellaneous" },
 ]
-protect_breaking_commits = false
+protect_breaking_commits = true
 filter_commits = false
 tag_pattern = "v[0-9]*"
 topo_order = false

@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [0.4.0] - 2026-11-20
 
+### ⚠ Breaking Changes
+
+- ForwardRule.target is Option<String> and ForwardRule has a new `sni` field; ConnectionInfo and the ConnectionOpened/Closed events gain `sni: Option<String>`.
+
 ### Documentation
 
 - Install from crates.io in the README
@@ -11,7 +15,7 @@ All notable changes to this project are documented in this file.
 
 ### Features
 
-- Route one listen port to several targets by TLS SNI
+- **BREAKING** Route one listen port to several targets by TLS SNI
 
 ## [0.3.0] - 2026-10-23
 
@@ -64,13 +68,17 @@ All notable changes to this project are documented in this file.
 
 ## [0.2.0] - 2026-09-09
 
+### ⚠ Breaking Changes
+
+- Forward/client's `secure`/`token` boolean-style config fields are replaced by `transport = "tls" | "noise"`; a config still using the old fields fails to load with a pointer to the new field instead of being silently reinterpreted. serve/connect's control channel is Noise-only now, so both ends of an existing tunnel must upgrade together.
+
 ### Documentation
 
 - Add install instructions and a systemd unit template
 
 ### Features
 
-- Replace TLS with Noise for erbridge-internal connections
+- **BREAKING** Replace TLS with Noise for erbridge-internal connections
 
 ## [0.1.4] - 2026-09-08
 
