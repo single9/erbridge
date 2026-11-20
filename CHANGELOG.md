@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.0] - 2026-11-20
+
+### Documentation
+
+- Install from crates.io in the README
+- Add crates.io and docs.rs badges to READMEs
+
+### Features
+
+- Route one listen port to several targets by TLS SNI
+
 ## [0.3.0] - 2026-10-23
 
 ### Bug Fixes
