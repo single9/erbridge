@@ -18,11 +18,12 @@ async fn forwards_tcp_traffic_to_target() {
     let rule = ForwardRule {
         name: Some("test".into()),
         listen: format!("127.0.0.1:{listen_port}"),
-        target: format!("127.0.0.1:{target_port}"),
+        target: Some(format!("127.0.0.1:{target_port}")),
         protocol: ProtocolKind::Tcp,
         udp_idle_secs: 60,
         transport: None,
         token: None,
+        sni: Default::default(),
     };
     let registry = Registry::new();
     tokio::spawn(run_forward(vec![rule], registry.clone()));
@@ -49,11 +50,12 @@ async fn forwards_tls_tcp_traffic_to_plaintext_target() {
     let rule = ForwardRule {
         name: Some("secure-test".into()),
         listen: format!("127.0.0.1:{listen_port}"),
-        target: format!("127.0.0.1:{target_port}"),
+        target: Some(format!("127.0.0.1:{target_port}")),
         protocol: ProtocolKind::Tcp,
         udp_idle_secs: 60,
         transport: Some(erbridge_core::config::Transport::Tls),
         token: None,
+        sni: Default::default(),
     };
     let registry = Registry::new();
     tokio::spawn(run_forward(vec![rule], registry.clone()));
@@ -79,11 +81,12 @@ async fn forwards_multiple_concurrent_tcp_connections() {
     let rule = ForwardRule {
         name: None,
         listen: format!("127.0.0.1:{listen_port}"),
-        target: format!("127.0.0.1:{target_port}"),
+        target: Some(format!("127.0.0.1:{target_port}")),
         protocol: ProtocolKind::Tcp,
         udp_idle_secs: 60,
         transport: None,
         token: None,
+        sni: Default::default(),
     };
     let registry = Registry::new();
     tokio::spawn(run_forward(vec![rule], registry.clone()));

@@ -48,10 +48,12 @@ pub mod forward;
 pub mod mux;
 #[doc(hidden)]
 pub mod noise;
+mod pending;
 #[doc(hidden)]
 pub mod proxy;
 pub mod reverse;
 pub mod sni;
+mod sni_routes;
 pub mod stats;
 pub mod tenant;
 pub mod tenant_store;

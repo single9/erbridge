@@ -15,10 +15,21 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::config::{ForwardRule, ProtocolKind, Transport};
 use crate::noise;
+use crate::pending::PendingLimiter;
 use crate::proxy::pipe_bidirectional_tracked;
 use crate::reverse::{MAX_TOKEN_LEN, constant_time_eq, read_frame};
+use crate::sni;
+use crate::sni_routes::SniRoutes;
 use crate::stats::{ConnectionInfo, Protocol, Registry};
 use crate::tls;
+
+/// How long a client gets to complete the listen-side TLS or Noise handshake,
+/// token exchange included.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a client gets to send its TLS ClientHello when the rule routes by
+/// SNI.
+const SNI_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Object-safe alias so a plain `TcpStream` and a `TlsStream<TcpStream>` can
 /// share one code path through [`pipe_bidirectional_tracked`].
@@ -98,6 +109,19 @@ async fn run_tcp_forward(rule: ForwardRule, registry: Registry) -> Result<()> {
         }
     };
 
+    let routing = if rule.sni.is_empty() {
+        Routing::Fixed(rule.target.clone().context("forward rule has no target")?)
+    } else {
+        Routing::Sni(Arc::new(SniRoutes::new(&rule.sni, rule.target.as_deref())?))
+    };
+
+    // Connections that make us wait on the client before they are routed
+    // (a handshake, a ClientHello) are bounded and timed out, so slow or
+    // silent peers cannot pin tasks and descriptors. A plain fixed-target
+    // rule connects straight away and needs neither.
+    let limiter = (!matches!(security, ConnSecurity::Plain) || matches!(routing, Routing::Sni(_)))
+        .then(PendingLimiter::with_defaults);
+
     registry.info(format!(
         "forward[{}] tcp{} listening on {} -> {}",
         rule.label(),
@@ -107,33 +131,137 @@ async fn run_tcp_forward(rule: ForwardRule, registry: Registry) -> Result<()> {
             Some(Transport::Noise) => " (noise)",
         },
         rule.listen,
-        rule.target
+        rule.destinations()
     ));
 
     loop {
         let (client, peer) = listener.accept().await?;
+        let pending = match &limiter {
+            None => None,
+            Some(limiter) => match limiter.try_acquire(peer.ip()) {
+                Ok(slot) => Some(slot),
+                Err(refused) => {
+                    if refused.should_log() {
+                        registry.error(format!(
+                            "forward[{}] tcp {peer}: too many pending connections (listener or per-address limit); refused {} so far",
+                            rule.label(),
+                            refused.0
+                        ));
+                    }
+                    continue;
+                }
+            },
+        };
         let rule = rule.clone();
         let registry = registry.clone();
         let security = security.clone();
+        let routing = routing.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_tcp_conn(client, peer, &rule, &registry, security).await {
+            let conn = TcpConn {
+                peer,
+                rule: &rule,
+                registry: &registry,
+                security,
+                routing,
+                pending,
+            };
+            if let Err(e) = handle_tcp_conn(client, conn).await {
                 registry.error(format!("forward[{}] tcp {peer}: {e:#}", rule.label()));
             }
         });
     }
 }
 
-async fn handle_tcp_conn(
+/// How a rule picks the target for a TCP connection.
+#[derive(Clone)]
+enum Routing {
+    Fixed(String),
+    Sni(Arc<SniRoutes>),
+}
+
+struct TcpConn<'a> {
+    peer: SocketAddr,
+    rule: &'a ForwardRule,
+    registry: &'a Registry,
+    security: ConnSecurity,
+    routing: Routing,
+    /// Held until the connection is routed, then released.
+    pending: Option<crate::pending::PendingSlot>,
+}
+
+async fn handle_tcp_conn(client: TcpStream, conn: TcpConn<'_>) -> Result<()> {
+    let TcpConn {
+        peer,
+        rule,
+        registry,
+        security,
+        routing,
+        pending,
+    } = conn;
+    let _ = client.set_nodelay(true);
+
+    let mut client = tokio::time::timeout(HANDSHAKE_TIMEOUT, secure(client, peer, rule, security))
+        .await
+        .context("client handshake timed out")??;
+
+    // The bytes read to route the connection, replayed to the target, and
+    // the SNI they carried.
+    let (target_addr, preamble, sni) = match routing {
+        Routing::Fixed(target) => (target, Vec::new(), None),
+        Routing::Sni(routes) => {
+            let peeked = sni::peek_sni(&mut client, SNI_TIMEOUT).await?;
+            let Some(target) = routes.resolve(peeked.sni.as_deref()) else {
+                anyhow::bail!(
+                    "no SNI route for {} and no fallback target",
+                    peeked.sni.as_deref().unwrap_or("a ClientHello without SNI")
+                );
+            };
+            (target.to_string(), peeked.buffered, peeked.sni)
+        }
+    };
+    drop(pending);
+
+    let mut target = TcpStream::connect(&target_addr)
+        .await
+        .with_context(|| format!("connecting to target {target_addr}"))?;
+    let _ = target.set_nodelay(true);
+
+    let info = registry.open_routed(
+        format!("forward:{}", rule.label()),
+        Protocol::Tcp,
+        peer.to_string(),
+        target_addr,
+        sni,
+    );
+    let result = async {
+        if !preamble.is_empty() {
+            target.write_all(&preamble).await?;
+            info.bytes_in
+                .fetch_add(preamble.len() as u64, Ordering::Relaxed);
+        }
+        pipe_bidirectional_tracked(
+            client,
+            target,
+            info.bytes_in.clone(),
+            info.bytes_out.clone(),
+        )
+        .await
+    }
+    .await;
+    registry.close(&info);
+    result.map_err(Into::into)
+}
+
+/// Runs the listen-side TLS or Noise handshake (and, for TLS, the optional
+/// token exchange).
+async fn secure(
     client: TcpStream,
     peer: SocketAddr,
     rule: &ForwardRule,
-    registry: &Registry,
     security: ConnSecurity,
-) -> Result<()> {
-    let _ = client.set_nodelay(true);
-
-    let client: Box<dyn AsyncStream> = match security {
-        ConnSecurity::Plain => Box::new(client),
+) -> Result<Box<dyn AsyncStream>> {
+    match security {
+        ConnSecurity::Plain => Ok(Box::new(client)),
         ConnSecurity::Tls(acceptor) => {
             let mut tls_stream = acceptor
                 .accept(client)
@@ -149,36 +277,15 @@ async fn handle_tcp_conn(
                 }
                 tls_stream.write_all(&[1u8]).await?;
             }
-            Box::new(tls_stream)
+            Ok(Box::new(tls_stream))
         }
         ConnSecurity::Noise(psk) => {
             let noise_stream = noise::accept(client, &psk)
                 .await
                 .context("Noise handshake with client failed")?;
-            Box::new(noise_stream)
+            Ok(Box::new(noise_stream))
         }
-    };
-
-    let target = TcpStream::connect(&rule.target)
-        .await
-        .with_context(|| format!("connecting to target {}", rule.target))?;
-    let _ = target.set_nodelay(true);
-
-    let info = registry.open(
-        format!("forward:{}", rule.label()),
-        Protocol::Tcp,
-        peer.to_string(),
-        rule.target.clone(),
-    );
-    let result = pipe_bidirectional_tracked(
-        client,
-        target,
-        info.bytes_in.clone(),
-        info.bytes_out.clone(),
-    )
-    .await;
-    registry.close(&info);
-    result.map_err(Into::into)
+    }
 }
 
 struct UdpSession {
@@ -196,11 +303,15 @@ async fn run_udp_forward(rule: ForwardRule, registry: Registry) -> Result<()> {
             .await
             .with_context(|| format!("binding UDP listener on {}", rule.listen))?,
     );
+    // Validated at startup: SNI routes require tcp, so a UDP leg has a target.
+    let target = rule
+        .target
+        .clone()
+        .context("UDP forwarding needs a target")?;
     registry.info(format!(
-        "forward[{}] udp listening on {} -> {}",
+        "forward[{}] udp listening on {} -> {target}",
         rule.label(),
         rule.listen,
-        rule.target
     ));
 
     let sessions: Arc<StdMutex<HashMap<SocketAddr, UdpSession>>> =
@@ -238,7 +349,7 @@ async fn run_udp_forward(rule: ForwardRule, registry: Registry) -> Result<()> {
                     format!("forward:{}", rule.label()),
                     Protocol::Udp,
                     src.to_string(),
-                    rule.target.clone(),
+                    target.clone(),
                 );
                 map.insert(
                     src,
@@ -250,7 +361,7 @@ async fn run_udp_forward(rule: ForwardRule, registry: Registry) -> Result<()> {
                 spawn_udp_session(
                     socket.clone(),
                     src,
-                    rule.target.clone(),
+                    target.clone(),
                     rx,
                     info,
                     sessions.clone(),

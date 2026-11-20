@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -49,7 +50,11 @@ pub enum Transport {
 pub struct ForwardRule {
     pub name: Option<String>,
     pub listen: String,
-    pub target: String,
+    /// Where connections go. With `sni` set this is the fallback for a
+    /// ClientHello that matches no route (or carries no SNI), and may be
+    /// left out to close such connections instead. Required otherwise.
+    #[serde(default)]
+    pub target: Option<String>,
     #[serde(default)]
     pub protocol: ProtocolKind,
     #[serde(default = "default_udp_idle_secs")]
@@ -64,17 +69,36 @@ pub struct ForwardRule {
     /// [`Transport::Noise`]. Required when `transport = "noise"`.
     #[serde(default)]
     pub token: Option<String>,
+    /// Routes TCP connections by the SNI of the TLS ClientHello the client
+    /// sends (inside the listen-side `transport`, if any), as
+    /// `"host" = "target"`. A key is an exact host or a single-label
+    /// wildcard (`*.example.com` matches `a.example.com` only). Requires
+    /// `protocol = "tcp"`. Empty means route everything to `target`.
+    #[serde(default)]
+    pub sni: BTreeMap<String, String>,
 }
 
 impl ForwardRule {
     pub fn label(&self) -> String {
-        self.name
-            .clone()
-            .unwrap_or_else(|| format!("{}->{}", self.listen, self.target))
+        self.name.clone().unwrap_or_else(|| match &self.target {
+            Some(target) if self.sni.is_empty() => format!("{}->{target}", self.listen),
+            _ => format!("{}->sni", self.listen),
+        })
+    }
+
+    /// The configured target, or a summary of the SNI routes, for logs.
+    pub fn destinations(&self) -> String {
+        match (&self.target, self.sni.len()) {
+            (Some(target), 0) => target.clone(),
+            (Some(target), n) => format!("{n} SNI route(s), fallback {target}"),
+            (None, n) => format!("{n} SNI route(s), no fallback"),
+        }
     }
 
     /// `transport = "noise"` has no anonymous form (see [`Transport::Noise`]),
     /// so a token is mandatory there; `tls` and plaintext leave it optional.
+    /// SNI routing only exists for TCP, and a rule needs somewhere to send
+    /// connections: a `target`, SNI routes, or both.
     pub fn validate(&self) -> Result<()> {
         if self.transport == Some(Transport::Noise) && self.token.is_none() {
             bail!(
@@ -82,6 +106,23 @@ impl ForwardRule {
                 self.label()
             );
         }
+        if self.sni.is_empty() {
+            if self.target.is_none() {
+                bail!(
+                    "forward[{}]: needs a `target` or `[forward.sni]` routes",
+                    self.label()
+                );
+            }
+            return Ok(());
+        }
+        if self.protocol != ProtocolKind::Tcp {
+            bail!(
+                "forward[{}]: `[forward.sni]` routes TLS connections, which only TCP carries; set protocol = \"tcp\"",
+                self.label()
+            );
+        }
+        crate::sni_routes::SniRoutes::new(&self.sni, self.target.as_deref())
+            .map_err(|e| anyhow::anyhow!("forward[{}]: {e}", self.label()))?;
         Ok(())
     }
 }
@@ -228,11 +269,12 @@ pub fn parse_map_flag(raw: &str) -> Result<ForwardRule> {
     Ok(ForwardRule {
         name: None,
         listen,
-        target: target_raw.to_string(),
+        target: Some(target_raw.to_string()),
         protocol,
         udp_idle_secs: default_udp_idle_secs(),
         transport,
         token: None,
+        sni: BTreeMap::new(),
     })
 }
 
@@ -362,6 +404,93 @@ mod tests {
     #[test]
     fn map_flag_both_plus_tls_is_rejected() {
         assert!(parse_map_flag("8080->10.0.0.5:80/both+tls").is_err());
+    }
+
+    fn forward_rule(toml_text: &str) -> ForwardRule {
+        let cfg: FileConfig = toml::from_str(toml_text).unwrap();
+        cfg.forward.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn the_example_config_validates() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config.example.toml");
+        let cfg = FileConfig::load(&path).unwrap();
+        assert!(cfg.forward.iter().any(|r| !r.sni.is_empty()));
+        for rule in &cfg.forward {
+            rule.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn sni_routes_load_with_an_optional_fallback() {
+        let rule = forward_rule(
+            r#"
+            [[forward]]
+            listen = "0.0.0.0:8443"
+            protocol = "tcp"
+            [forward.sni]
+            "a.example.com" = "192.0.2.10:443"
+            "*.example.net" = "198.51.100.20:443"
+            "#,
+        );
+        assert_eq!(rule.target, None);
+        assert_eq!(rule.sni.len(), 2);
+        rule.validate().unwrap();
+    }
+
+    #[test]
+    fn sni_routes_require_tcp() {
+        let rule = forward_rule(
+            r#"
+            [[forward]]
+            listen = "0.0.0.0:8443"
+            target = "192.0.2.10:443"
+            [forward.sni]
+            "a.example.com" = "192.0.2.10:443"
+            "#,
+        );
+        let err = rule.validate().unwrap_err();
+        assert!(err.to_string().contains(r#"protocol = "tcp""#), "{err:#}");
+    }
+
+    #[test]
+    fn a_rule_without_target_or_sni_is_rejected() {
+        let rule = forward_rule(
+            r#"
+            [[forward]]
+            listen = "0.0.0.0:8443"
+            protocol = "tcp"
+            "#,
+        );
+        let err = rule.validate().unwrap_err();
+        assert!(err.to_string().contains("needs a `target`"), "{err:#}");
+    }
+
+    #[test]
+    fn a_malformed_sni_key_fails_validation() {
+        let rule = forward_rule(
+            r#"
+            [[forward]]
+            listen = "0.0.0.0:8443"
+            protocol = "tcp"
+            [forward.sni]
+            "a.*.example.com" = "192.0.2.10:443"
+            "#,
+        );
+        assert!(rule.validate().is_err());
+    }
+
+    #[test]
+    fn a_misspelled_forward_field_is_rejected() {
+        let result: std::result::Result<FileConfig, _> = toml::from_str(
+            r#"
+            [[forward]]
+            listen = "0.0.0.0:8443"
+            target = "192.0.2.10:443"
+            sni_routes = {}
+            "#,
+        );
+        assert!(result.is_err());
     }
 
     #[test]

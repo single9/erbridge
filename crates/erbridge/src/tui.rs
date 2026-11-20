@@ -127,7 +127,10 @@ fn render_connections(
             Cell::from(c.label.clone()),
             Cell::from(c.protocol.to_string()),
             Cell::from(c.source.clone()),
-            Cell::from(c.destination.clone()),
+            Cell::from(match &c.sni {
+                Some(sni) => format!("{} ({sni})", c.destination),
+                None => c.destination.clone(),
+            }),
             Cell::from(human_bytes(
                 c.bytes_in.load(std::sync::atomic::Ordering::Relaxed),
             )),

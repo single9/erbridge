@@ -37,6 +37,9 @@ pub struct ConnectionInfo {
     pub protocol: Protocol,
     pub source: String,
     pub destination: String,
+    /// The TLS SNI the connection was routed by, for a `forward` rule with
+    /// `[forward.sni]` routes whose client sent one.
+    pub sni: Option<String>,
     pub started_at: Instant,
     pub bytes_in: Arc<AtomicU64>,
     pub bytes_out: Arc<AtomicU64>,
@@ -57,6 +60,8 @@ pub enum Event {
         protocol: Protocol,
         source: String,
         destination: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sni: Option<String>,
     },
     ConnectionClosed {
         id: ConnId,
@@ -64,6 +69,8 @@ pub enum Event {
         protocol: Protocol,
         source: String,
         destination: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sni: Option<String>,
         bytes_in: u64,
         bytes_out: u64,
         duration_ms: u128,
@@ -84,23 +91,42 @@ impl fmt::Display for Event {
                 protocol,
                 source,
                 destination,
+                sni,
                 ..
-            } => write!(f, "[open] {label} {protocol} {source} -> {destination}"),
+            } => write!(
+                f,
+                "[open] {label} {protocol} {source} -> {destination}{}",
+                SniSuffix(sni)
+            ),
             Event::ConnectionClosed {
                 label,
                 protocol,
                 source,
                 destination,
+                sni,
                 bytes_in,
                 bytes_out,
                 duration_ms,
                 ..
             } => write!(
                 f,
-                "[close] {label} {protocol} {source} -> {destination} in={bytes_in}B out={bytes_out}B dur={duration_ms}ms"
+                "[close] {label} {protocol} {source} -> {destination}{} in={bytes_in}B out={bytes_out}B dur={duration_ms}ms",
+                SniSuffix(sni)
             ),
             Event::Info { message } => write!(f, "[info] {message}"),
             Event::Error { message } => write!(f, "[error] {message}"),
+        }
+    }
+}
+
+/// Renders ` (sni host)` after a destination, or nothing.
+struct SniSuffix<'a>(&'a Option<String>);
+
+impl fmt::Display for SniSuffix<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(sni) => write!(f, " (sni {sni})"),
+            None => Ok(()),
         }
     }
 }
@@ -175,12 +201,26 @@ impl Registry {
         source: impl Into<String>,
         destination: impl Into<String>,
     ) -> ConnectionInfo {
+        self.open_routed(label, protocol, source, destination, None)
+    }
+
+    /// [`Registry::open`] for a connection routed by TLS SNI, recording the
+    /// SNI it carried (`None` if it had none).
+    pub fn open_routed(
+        &self,
+        label: impl Into<String>,
+        protocol: Protocol,
+        source: impl Into<String>,
+        destination: impl Into<String>,
+        sni: Option<String>,
+    ) -> ConnectionInfo {
         let info = ConnectionInfo {
             id: self.next_id(),
             label: label.into(),
             protocol,
             source: source.into(),
             destination: destination.into(),
+            sni,
             started_at: Instant::now(),
             bytes_in: Arc::new(AtomicU64::new(0)),
             bytes_out: Arc::new(AtomicU64::new(0)),
@@ -193,6 +233,7 @@ impl Registry {
             protocol: info.protocol,
             source: info.source.clone(),
             destination: info.destination.clone(),
+            sni: info.sni.clone(),
         });
         info
     }
@@ -211,6 +252,7 @@ impl Registry {
             protocol: info.protocol,
             source: info.source.clone(),
             destination: info.destination.clone(),
+            sni: info.sni.clone(),
             bytes_in,
             bytes_out,
             duration_ms: info.duration().as_millis(),
@@ -318,6 +360,42 @@ mod tests {
             events.try_recv(),
             Ok(Event::ConnectionClosed { .. })
         ));
+    }
+
+    #[test]
+    fn the_sni_shows_in_log_lines_and_json_only_when_present() {
+        let registry = Registry::new();
+        let routed = registry.open_routed(
+            "web",
+            Protocol::Tcp,
+            "192.0.2.1:5",
+            "192.0.2.9:443",
+            Some("a.example.com".into()),
+        );
+        let plain = registry.open("web", Protocol::Tcp, "192.0.2.1:6", "192.0.2.9:443");
+        registry.close(&routed);
+
+        let log = registry.recent_log();
+        assert!(
+            log[0].ends_with("-> 192.0.2.9:443 (sni a.example.com)"),
+            "{}",
+            log[0]
+        );
+        assert!(log[1].ends_with("-> 192.0.2.9:443"), "{}", log[1]);
+        assert!(log[2].contains("(sni a.example.com) in="), "{}", log[2]);
+
+        let opened = |info: &ConnectionInfo| Event::ConnectionOpened {
+            id: info.id,
+            label: info.label.clone(),
+            protocol: info.protocol,
+            source: info.source.clone(),
+            destination: info.destination.clone(),
+            sni: info.sni.clone(),
+        };
+        let json = serde_json::to_value(opened(&routed)).unwrap();
+        assert_eq!(json["sni"], "a.example.com");
+        let json = serde_json::to_value(opened(&plain)).unwrap();
+        assert!(json.get("sni").is_none(), "{json}");
     }
 
     #[test]

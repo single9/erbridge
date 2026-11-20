@@ -44,6 +44,17 @@ transport = "noise"          # wraps the listen-side connection in the Noise pro
 token = "change-me"          # required under transport = "noise": hashed into the handshake's
                               # pre-shared key, rather than checked afterward like the tls transport does
 
+[[forward]]
+name = "https-mux"
+listen = "0.0.0.0:9443"
+protocol = "tcp"             # required: SNI routing is TCP only
+target = "10.0.0.5:443"      # optional: where a ClientHello matching no route (or without SNI)
+                              # goes; omit to close such connections instead
+# transport/token work here too: the SNI is then read from the TLS inside the transport
+[forward.sni]                 # route by the TLS ClientHello's SNI, without terminating TLS
+"app.example.com" = "10.0.0.5:443"
+"*.example.net" = "10.0.0.6:443"   # one label only: a.example.net, not example.net or a.b.example.net
+
 # ---- client: companion to a forward mapping with a `transport` above, can be repeated ----
 [[client]]
 name = "tls-web"

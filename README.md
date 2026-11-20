@@ -251,6 +251,26 @@ git checkout vX.Y.Z && cargo publish --workspace
 
 ## Upgrading
 
+### From 0.3 to 0.4
+
+**Using the `erbridge` command: nothing to change.** Existing config files and flags work as
+before. `[[forward]]` gains an optional `[forward.sni]` table (see
+[Route one port by SNI](#forward-route-one-port-to-several-tls-backends-by-sni)), and `target`
+may be left out when that table is set.
+
+`forward` mappings with a `transport` now give a client 5 seconds to finish the handshake (and
+token exchange), and cap how many connections may be mid-handshake at once (256 per mapping, 16
+per source address). Connections over the cap are closed straight away.
+
+**Using erbridge as a library:** `config::ForwardRule` and the connection events changed shape.
+
+- `ForwardRule.target` is now `Option<String>`: wrap existing values in `Some(...)`.
+- New field `ForwardRule.sni: BTreeMap<String, String>`: add `sni: Default::default()` to
+  struct literals.
+- `stats::ConnectionInfo` and the `Event::ConnectionOpened` / `Event::ConnectionClosed`
+  variants gain `sni: Option<String>`. Patterns that list every field need `sni` or `..`.
+  `Registry::open` is unchanged; `Registry::open_routed` also records an SNI.
+
 ### From 0.2 to 0.3
 
 **Using the `erbridge` command: nothing to change.** The commands, flags and config files are
@@ -314,6 +334,34 @@ mandatory token that's cryptographically bound into it rather than checked after
 ```sh
 erbridge forward --map "8444->10.0.0.5:80/noise" --token change-me
 ```
+
+### forward: route one port to several TLS backends by SNI
+
+A `[forward.sni]` table sends each TCP connection to a target chosen by the SNI of the TLS
+ClientHello the client sends, so several HTTPS backends can share one external port. erbridge
+does not terminate that TLS: it reads the ClientHello, picks the target, replays the bytes it
+read, and then pipes as usual.
+
+```toml
+[[forward]]
+name = "https-mux"
+listen = "0.0.0.0:8443"
+protocol = "tcp"                 # required: SNI routing is TCP only
+target = "10.0.0.5:443"          # optional fallback for no match / no SNI; omit to close those
+[forward.sni]
+"app.example.com" = "10.0.0.5:443"
+"*.example.net"   = "10.0.0.6:443"   # matches a.example.net, not example.net or a.b.example.net
+```
+
+Matching ignores case and a trailing dot; an exact host wins over a wildcard. It also works
+under `transport = "tls"` or `"noise"`: the SNI is read from the TLS the client sends *inside*
+that transport, so a `client` on the far side can carry several HTTPS hosts through one
+mapping. A client that does not send a ClientHello within 5 seconds is closed.
+
+Clients must send real SNI, so they have to reach erbridge by the backend's host name (for
+example via DNS or a hosts-file entry pointing it at erbridge, or at a local `client`). A
+ClientHello split across several TLS records, or one using Encrypted Client Hello, cannot be
+routed by its inner name.
 
 ### client: reach a secured forward mapping without your own TLS/Noise support
 
@@ -407,6 +455,11 @@ For background/service mode use `--headless`, which writes structured JSON lines
 erbridge --headless --log-file /var/log/erbridge.log serve --config config.toml
 ```
 
+Connections routed by `[forward.sni]` also record the SNI the client sent (as sent, before
+case normalization), including ones that fell through to the fallback `target`: the TUI shows
+it next to the destination, log lines end in `(sni <host>)`, and JSON lines carry an `sni`
+field. Connections without one leave the field out.
+
 ## Security notes
 
 The A↔B connection in reverse mode is encrypted and authenticated with the Noise protocol
@@ -435,6 +488,12 @@ layers on a post-handshake, constant-time-compared token check exchanged in a pl
 frame: it restricts *who* can connect (only a peer that knows the token and speaks that
 frame, i.e. `client` mode), but doesn't change what the TLS layer itself does or doesn't
 prove — the identity caveat above still applies.
+
+A `forward` mapping that has to wait on the client before routing it (a `transport`
+handshake, or reading the ClientHello for `[forward.sni]`) times that wait out after 5 seconds
+and caps how many connections may be waiting at once: 256 per mapping and 16 per source
+address. Connections over the cap are closed without being read. A plaintext mapping with a
+fixed `target` connects straight away and has neither limit.
 
 Noise depends on the `snow` crate built with its `ring-accelerated` feature (see
 `Cargo.toml`), which runs the ChaCha20-Poly1305 and X25519 operations through `ring` instead
@@ -488,7 +547,7 @@ with `cargo add erbridge-core`; the API docs are on [docs.rs](https://docs.rs/er
 
 ```sh
 make test    # equivalent to cargo test: covers forward's TCP/UDP forwarding, UDP idle timeout,
-             # TLS- and Noise-secured forward mappings, client mode against both, the Noise
+             # TLS- and Noise-secured forward mappings, SNI routing, client mode against both, the Noise
              # transport itself, serve/connect's multiplexed forwarding and PSK authentication, and
              # shutdown of both roles
 ```

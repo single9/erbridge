@@ -20,11 +20,12 @@ async fn client_reaches_token_secured_forward_mapping() {
     let forward_rule = ForwardRule {
         name: Some("secured".into()),
         listen: format!("127.0.0.1:{forward_port}"),
-        target: format!("127.0.0.1:{target_port}"),
+        target: Some(format!("127.0.0.1:{target_port}")),
         protocol: ProtocolKind::Tcp,
         udp_idle_secs: 60,
         transport: Some(Transport::Tls),
         token: Some("change-me".into()),
+        sni: Default::default(),
     };
     let forward_registry = Registry::new();
     tokio::spawn(run_forward(vec![forward_rule], forward_registry.clone()));
@@ -62,11 +63,12 @@ async fn client_with_wrong_token_is_rejected() {
     let forward_rule = ForwardRule {
         name: Some("secured".into()),
         listen: format!("127.0.0.1:{forward_port}"),
-        target: format!("127.0.0.1:{target_port}"),
+        target: Some(format!("127.0.0.1:{target_port}")),
         protocol: ProtocolKind::Tcp,
         udp_idle_secs: 60,
         transport: Some(Transport::Tls),
         token: Some("correct-token".into()),
+        sni: Default::default(),
     };
     let forward_registry = Registry::new();
     tokio::spawn(run_forward(vec![forward_rule], forward_registry.clone()));
@@ -115,11 +117,12 @@ async fn client_reaches_noise_secured_forward_mapping() {
     let forward_rule = ForwardRule {
         name: Some("secured".into()),
         listen: format!("127.0.0.1:{forward_port}"),
-        target: format!("127.0.0.1:{target_port}"),
+        target: Some(format!("127.0.0.1:{target_port}")),
         protocol: ProtocolKind::Tcp,
         udp_idle_secs: 60,
         transport: Some(Transport::Noise),
         token: Some("change-me".into()),
+        sni: Default::default(),
     };
     let forward_registry = Registry::new();
     tokio::spawn(run_forward(vec![forward_rule], forward_registry.clone()));
@@ -157,11 +160,12 @@ async fn client_with_wrong_token_over_noise_is_rejected() {
     let forward_rule = ForwardRule {
         name: Some("secured".into()),
         listen: format!("127.0.0.1:{forward_port}"),
-        target: format!("127.0.0.1:{target_port}"),
+        target: Some(format!("127.0.0.1:{target_port}")),
         protocol: ProtocolKind::Tcp,
         udp_idle_secs: 60,
         transport: Some(Transport::Noise),
         token: Some("correct-token".into()),
+        sni: Default::default(),
     };
     let forward_registry = Registry::new();
     tokio::spawn(run_forward(vec![forward_rule], forward_registry.clone()));

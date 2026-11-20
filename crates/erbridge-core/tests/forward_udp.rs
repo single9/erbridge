@@ -19,11 +19,12 @@ async fn forwards_udp_traffic_to_target() {
     let rule = ForwardRule {
         name: Some("udp-test".into()),
         listen: format!("127.0.0.1:{listen_port}"),
-        target: format!("127.0.0.1:{target_port}"),
+        target: Some(format!("127.0.0.1:{target_port}")),
         protocol: ProtocolKind::Udp,
         udp_idle_secs: 5,
         transport: None,
         token: None,
+        sni: Default::default(),
     };
     let registry = Registry::new();
     tokio::spawn(run_forward(vec![rule], registry.clone()));
@@ -54,11 +55,12 @@ async fn evicts_idle_udp_sessions() {
     let rule = ForwardRule {
         name: Some("udp-idle-test".into()),
         listen: format!("127.0.0.1:{listen_port}"),
-        target: format!("127.0.0.1:{target_port}"),
+        target: Some(format!("127.0.0.1:{target_port}")),
         protocol: ProtocolKind::Udp,
         udp_idle_secs: 1,
         transport: None,
         token: None,
+        sni: Default::default(),
     };
     let registry = Registry::new();
     tokio::spawn(run_forward(vec![rule], registry.clone()));
